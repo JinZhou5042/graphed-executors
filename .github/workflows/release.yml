@@ -13,8 +13,8 @@ name: release
 # (Sigstore-signed) and uploads them alongside each artifact — no API token or separate attest step
 # needed. The provenance ties every file to this repo + workflow + commit.
 #
-# NOTE: bump the version in pyproject.toml before tagging — PyPI rejects re-uploading an existing
-# version (0.0.1 may already be published).
+# NOTE: bump the version in pyproject.toml before tagging — PyPI rejects re-uploading a version
+# that already exists.
 
 on:
   push:

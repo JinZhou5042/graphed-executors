@@ -626,8 +626,8 @@ site-dependent — the syntax is right, the values are yours:
 * Use ``processes=True`` with one thread per worker for GIL-holding compiled stages, and
   ``dashboard_address=":0"`` on a local cluster to avoid a port clash.
 
-Free-threaded CPython (3.14t) is not available for the dask backend, because upstream
-``distributed`` has no free-threaded build yet. The local executors keep theirs.
+Free-threaded CPython (3.14t) is not a supported target for the dask backend: ``distributed``
+declares support up to 3.14 and nothing about free-threading. The local executors keep theirs.
 
 .. _design-parsl-backend:
 

@@ -9,4 +9,4 @@ imports a specific backend, so installing the base package pulls only the local 
 
 from __future__ import annotations
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"

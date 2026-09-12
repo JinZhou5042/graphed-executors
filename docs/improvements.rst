@@ -37,6 +37,6 @@ What does not work yet, and what to do instead.
   either backend the worker-to-worker exchange engine reports the combine count from the
   driver rather than emitting one event per combine.
 
-- **No free-threaded CPython (3.14t) on the dask path.** ``distributed`` has no
-  free-threaded build. The local executors run on 3.14t; on a dask cluster, use standard
-  CPython.
+- **No free-threaded CPython (3.14t) on the dask path.** ``distributed`` declares support up to
+  3.14 and nothing about free-threading. The local executors run on 3.14t; on a dask cluster, use
+  standard CPython.

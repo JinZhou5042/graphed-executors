@@ -21,8 +21,9 @@ pip install -e ".[dev,docs]"
 ```
 
 Install `graphed-histogram` from git **before** `pip install -e ".[dev]"`, as shown. The
-`dev` extra names it, and if git hasn't already satisfied it pip silently resolves a stale
-PyPI release — everything imports, and the histogram tests exercise the wrong package.
+`dev` extra names it, and if git hasn't already satisfied it pip resolves the PyPI release
+instead — everything imports, and the histogram tests exercise a different package than the
+one CI pins.
 
 Working on a cluster backend? Add its extra:
 

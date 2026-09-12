@@ -15,12 +15,13 @@ env:
   # the former core/debug/frontend/numpy/awkward siblings are now one consolidated package
   # Pinned, not @main: graphed is an unpinned upstream whose merges can redden this frozen suite with
   # no local change (graphed's auto-wired evaluators did exactly that). Bump this sha deliberately.
-  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@159839574f83c4486e32f498c0463b6908186257"
+  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@6464a3a4d8a4856e94b6aa648c63b1028fda2e08"
   # corpus stays a separate package (test fixtures only, not shipped in the graphed wheel)
   CORPUS: "graphed-corpus @ git+https://github.com/graphed-org/graphed-corpus-mvp@main"
-  # m49's frozen tree fills real histograms across the process boundary. Unlike CORPUS, omitting this
-  # fails SILENTLY: graphed-histogram IS on PyPI, so a missing line quietly installs the stale 0.0.1
-  # wheel and the job tests the wrong package. Needed in every job that collects tests/frozen.
+  # The frozen tree fills real histograms across the process boundary. Unlike CORPUS, omitting this
+  # fails SILENTLY: graphed-histogram IS on PyPI, so a missing line quietly installs the released
+  # wheel instead of the main this suite is frozen against, and the job goes green on the wrong
+  # package. Needed in every job that collects tests/frozen.
   HISTOGRAM: "graphed-histogram @ git+https://github.com/graphed-org/graphed-histogram@main"
 
 jobs:

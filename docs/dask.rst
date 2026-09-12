@@ -25,8 +25,9 @@ Two things worth checking before a long run:
 
 * Client and workers need the same ``dask``, ``distributed`` and ``graphed`` versions —
   ``client.get_versions(check=True)`` says so in one line.
-* **Free-threaded CPython (3.14t) does not work with the dask backend.** Upstream ``distributed``
-  has no free-threaded build. The laptop executors do run on 3.14t.
+* **Don't run the dask backend on free-threaded CPython (3.14t).** ``distributed`` declares
+  support up to 3.14 and says nothing about free-threading, so the dask paths are untested there.
+  The laptop executors do run on 3.14t.
 
 
 Your first cluster run
@@ -518,8 +519,8 @@ Not supported yet
   uniformly instead; opt-in enforcement is future work.
 * **The worker-to-worker engine and adaptive down-scaling do not mix.** Its worker pins mean a
   departing owner costs a whole-run restart. Pass ``shuffle_method="tasks"`` on elastic clusters.
-* **No free-threaded (3.14t) support**, because ``distributed`` has no free-threaded build. The
-  laptop executors do support it.
+* **No free-threaded (3.14t) support on the dask path**, because ``distributed`` declares none.
+  The laptop executors do support it.
 * **No peer-mode telemetry** from the worker-to-worker reduction path, as noted under
   `Watching a run`_.
 * **No checkpoint/resume on a cluster.** ``run_resumable`` and ``run_shuffle_resumable`` drive
