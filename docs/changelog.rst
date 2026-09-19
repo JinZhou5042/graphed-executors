@@ -1,6 +1,16 @@
 What changed
 ============
 
+0.0.3
+-----
+
+Packaging
+~~~~~~~~~
+
+* The MIT ``LICENSE`` file ships in the repository and in the sdist, so a conda-forge recipe can
+  take the license from the package it builds (#16). Nothing else changes: this release is
+  0.0.2's code, tested against graphed 0.0.3.
+
 0.0.2
 -----
 

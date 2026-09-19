@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphed-executors"
-version = "0.0.2"
+version = "0.0.3"
 description = "Run a graphed plan on threads, processes, a dask cluster, or a parsl pool"
 readme = "README.md"
 requires-python = ">=3.11"

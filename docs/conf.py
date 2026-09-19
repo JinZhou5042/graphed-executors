@@ -4,7 +4,7 @@ from __future__ import annotations
 
 project = "graphed-executors"
 author = "graphed-org"
-release = "0.0.2"
+release = "0.0.3"
 
 extensions = [
     "sphinx.ext.autodoc",
