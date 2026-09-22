@@ -9,6 +9,7 @@ venv/
 .coverage
 htmlcov/
 coverage.xml
+coverage.json
 dist/
 build/
 _build/

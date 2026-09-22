@@ -14,15 +14,23 @@
 # sit at 0% — it gates on the parsl job). The `test-dask` pytest step now uses a bare `--cov` so this
 # `[run] source` is authoritative (a path-valued `--cov=` OVERRIDES config source, silently un-gating
 # the moved engine — plan §1.6 item 3, tests-B-cov-2).
+# The `common` PACKAGE line is what closes the scope gap (`common/__init__.py` was in no job's
+# scope): a module added to `common/` is gated here by default instead of falling out of every job.
+# The four modules below stay named because the frozen m46/m47 packaging pins require them by name,
+# and the two parsl-gated modules are omitted so each `common/` module still gates exactly once.
 [run]
 branch = true
 source =
     graphed_executors.submit
     graphed_executors.dask_backend
+    graphed_executors.common
     graphed_executors.common.tasks_engine
     graphed_executors.common.transport_run
     graphed_executors.common.facade
     graphed_executors.common.transport_tasks
+omit =
+    */common/relay_engine.py
+    */common/http_plane.py
 
 [report]
 fail_under = 90

@@ -48,6 +48,8 @@ reproduce the corpus reference histograms **bit-for-bit**, invariant to `opt_lev
 
 Runtime: `graphed-core` (contract) + `graphed-debug` (StageError) + `graphed` (Session). Tests use
 `graphed-numpy` / `graphed-awkward` / `graphed-corpus`. Gates: `ruff` + `ruff format` · `mypy
---strict` · `pytest tests/frozen --cov=graphed_executors` (≥90%) · `sphinx -W`.
+--strict` · `pytest tests/frozen tests/extra --cov=graphed_executors` per-file >=90% line+branch
+(`scripts/coverage_gate.py`, never lowered) + PR diff-coverage >=98% (`diff-cover` vs `main`) ·
+`sphinx -W`.
 
 Status: see `.graphed/state.json`.

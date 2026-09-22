@@ -43,10 +43,18 @@ so a plain `pytest` is green in any of the environments above. CI runs the suite
 (x86_64 and arm64), macOS, and Windows across all supported Python versions, with the dask
 and parsl suites in dedicated jobs.
 
-To see the coverage CI will enforce (90% line + branch on `graphed_executors`):
+Coverage policy: every source file must be >= 90% line+branch covered on its own
+(`scripts/coverage_gate.py`, never lowered), and every PR must be >= 98% diff-covered against
+`main` (`diff-cover`, gating on the merge-queue run). Every source file is in exactly one job's
+coverage scope: the main matrix gates `local/` and `submit/`, `test-dask` gates `dask_backend/`,
+`submit/` and `common/` (bar the two parsl-gated modules), `test-parsl` gates `parsl_backend/`,
+`common/relay_engine.py` and `common/http_plane.py`. To see what CI will enforce:
 
 ```bash
-pytest --cov=graphed_executors --cov-branch --cov-report=term-missing
+pytest tests/frozen tests/extra --cov=graphed_executors --cov-branch --cov-report=term-missing
+coverage json -o coverage.json && python scripts/coverage_gate.py coverage.json 90
+# the delta gate (CI adds --exclude for the dask/parsl-scoped files)
+coverage xml -o coverage.xml && diff-cover coverage.xml --compare-branch=origin/main --fail-under=98
 ```
 
 ## Lint, types, docs

@@ -35,6 +35,8 @@ jobs:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -48,10 +50,28 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Lint + types (pre-commit hooks via prek)
         run: uvx prek@0.4.5 run --all-files --show-diff-on-failure
-      - name: Pytest + coverage gate (>=90%)
-        run: pytest tests/frozen --cov=graphed_executors --cov-branch --cov-report=term-missing
-      - name: Pytest m41 peer-reduction deadlock guards (gating)
-        run: pytest tests/extra/m41 -q
+      - name: Pytest (frozen + extra) + whole-package coverage (>=90%)
+        run: pytest tests/frozen tests/extra --cov=graphed_executors --cov-branch --cov-report=term-missing
+      - name: Per-file coverage gate (>=90% each)
+        shell: bash
+        run: |
+          coverage json -o coverage.json
+          python scripts/coverage_gate.py coverage.json 90
+      - name: Diff coverage gate (>=98% of changed lines vs main)
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        shell: bash
+        run: |
+          git fetch origin main
+          coverage xml -o coverage.xml
+          # ponytail: self-retiring — origin/main carries the gate only after this PR lands, so this
+          # rollout PR runs diff-cover informationally instead of failing on its own delta.
+          if git cat-file -e origin/main:scripts/coverage_gate.py 2>/dev/null; then
+            diff-cover coverage.xml --compare-branch=origin/main --fail-under=98 \
+              --exclude "*/dask_backend/*" "*/common/*" "*/parsl_backend/*"
+          else
+            diff-cover coverage.xml --compare-branch=origin/main \
+              --exclude "*/dask_backend/*" "*/common/*" "*/parsl_backend/*"
+          fi
 
   # Free-threaded / bleeding-edge Pythons (plan A.5): genuinely exercises concurrency under no-GIL.
   # Experimental + non-blocking (awkward wheels may lag on 3.14 / 3.14t).
@@ -93,6 +113,8 @@ jobs:
         python: ["3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -103,19 +125,41 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" pyarrow pandas
           python -m pip install -e ".[dev,dask]"
-      - name: Pytest m42+m43+m44+m45 dask suite + scoped coverage gate (>=90%)
+      - name: Pytest m42+m43+m44+m45 dask suite + extra witnesses + scoped coverage gate (>=90%)
         # bare `--cov` (m46, tests-B-cov-2): a path-valued `--cov=` OVERRIDES the config `[run] source`
         # (verified pytest-cov 7.1.0), which would silently discard the m46-added `common.tasks_engine`
         # source and gate the moved m43 engine by ZERO jobs. The `.coveragerc-dask` source is authoritative.
         run: |
           pytest tests/frozen/m42 tests/frozen/m43 tests/frozen/m44 tests/frozen/m45 \
+            tests/extra/m43 tests/extra/m44 \
             --cov-config=.coveragerc-dask \
             --cov-branch --cov \
             --cov-report=term-missing
-      - name: Pytest m43 join-parity witnesses (non-gating; interim until the frozen fixup lands)
-        run: pytest tests/extra/m43 -q
-      - name: Pytest m44 transport witnesses (non-gating)
-        run: pytest tests/extra/m44 -q
+      - name: Per-file coverage gate (>=90% each)
+        shell: bash
+        run: |
+          coverage json --rcfile=.coveragerc-dask -o coverage.json
+          python scripts/coverage_gate.py coverage.json 90
+      - name: Diff coverage gate (>=98% of changed lines vs main)
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        shell: bash
+        run: |
+          git fetch origin main
+          coverage xml --rcfile=.coveragerc-dask -o coverage.xml
+          # `--include` is glob.glob, not fnmatch (diff_cover 10.6.0 diff_reporter._is_path_excluded):
+          # these patterns must expand to real checkout-relative paths, mirroring .coveragerc-dask's
+          # source. The two parsl-gated `common/` modules are omitted from this job's coverage, so
+          # diff-cover finds no lines for them here and the parsl job's step is their only gate.
+          # ponytail: self-retiring guard, see the main job's step for why.
+          if git cat-file -e origin/main:scripts/coverage_gate.py 2>/dev/null; then
+            diff-cover coverage.xml --compare-branch=origin/main --fail-under=98 \
+              --include "src/graphed_executors/submit/**/*.py" "src/graphed_executors/dask_backend/**/*.py" \
+              "src/graphed_executors/common/**/*.py"
+          else
+            diff-cover coverage.xml --compare-branch=origin/main \
+              --include "src/graphed_executors/submit/**/*.py" "src/graphed_executors/dask_backend/**/*.py" \
+              "src/graphed_executors/common/**/*.py"
+          fi
 
   # The parsl executor backend (graphed_executors.parsl_backend) + the relay engine live behind the
   # [parsl] extra and importorskip out of the main matrix. This dedicated job installs it and runs the
@@ -135,6 +179,8 @@ jobs:
         python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -145,7 +191,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" pyarrow
           python -m pip install -e ".[dev,parsl]"
-      - name: Pytest frozen m46 + m47 suites + scoped coverage gate (>=90%)
+      - name: Pytest frozen m46 + m47 suites + extra witnesses + scoped coverage gate (>=90%)
         # The §1.4 transport bodies (peer shuffle/join + HTTP block plane) run ONLY in HTEX WORKER
         # processes, exec'd fresh — coverage's driver tracer never sees them. A portable process-start
         # hook (coverage.py "Measuring subprocesses") + COVERAGE_PROCESS_START makes each worker
@@ -160,7 +206,7 @@ jobs:
           COVERAGE_RCFILE: ${{ github.workspace }}/.coveragerc-parsl
         run: |
           python -c "import sysconfig, pathlib; pathlib.Path(sysconfig.get_path('purelib'), 'graphed_subcov.pth').write_text('import coverage; coverage.process_startup()\n')"
-          pytest tests/frozen/m46 tests/frozen/m47 \
+          pytest tests/frozen/m46 tests/frozen/m47 tests/extra/m47 \
             --cov --cov-config=.coveragerc-parsl \
             --cov-branch --cov-fail-under=0
           # settle: force any lingering HTEX pool workers to flush their subprocess coverage
@@ -172,6 +218,28 @@ jobs:
           mv .coverage .coverage.driver
           coverage combine
           coverage report --show-missing --fail-under=90
+      - name: Per-file coverage gate (>=90% each)
+        shell: bash
+        run: |
+          coverage json --rcfile=.coveragerc-parsl -o coverage.json
+          python scripts/coverage_gate.py coverage.json 90
+      - name: Diff coverage gate (>=98% of changed lines vs main)
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        shell: bash
+        run: |
+          git fetch origin main
+          coverage xml --rcfile=.coveragerc-parsl -o coverage.xml
+          # `--include` is glob.glob, not fnmatch — see the test-dask job's step for the measurement.
+          # ponytail: self-retiring guard, see the main job's step for why.
+          if git cat-file -e origin/main:scripts/coverage_gate.py 2>/dev/null; then
+            diff-cover coverage.xml --compare-branch=origin/main --fail-under=98 \
+              --include "src/graphed_executors/parsl_backend/**/*.py" \
+              "src/graphed_executors/common/relay_engine.py" "src/graphed_executors/common/http_plane.py"
+          else
+            diff-cover coverage.xml --compare-branch=origin/main \
+              --include "src/graphed_executors/parsl_backend/**/*.py" \
+              "src/graphed_executors/common/relay_engine.py" "src/graphed_executors/common/http_plane.py"
+          fi
 
   docs:
     name: docs (sphinx -W)

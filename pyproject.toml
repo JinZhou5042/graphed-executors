@@ -29,6 +29,7 @@ dev = [
   "hypothesis",
   "mypy",
   "ruff",
+  "diff_cover",
   "graphed[awkward,numpy]>=0.0.2",
   "graphed-corpus",
   # the frozen tree drives the varied-fill lowering end-to-end, which needs surfaces added after
