@@ -15,7 +15,7 @@ two-input join (`run_join`). **Frozen — read-only after `freeze-M40-0`.**
 | `test_join_cost_model.py` | **(c)** | pinned rule at the exact crossover; executor HONOURS the plan-recorded `broadcast=` (not a runtime recompute); two auto runs → identical choice + bytes |
 | `test_join_arrival_determinism.py` | **(e)** | join bit-identical under drop+dup announcements and a forced steal; content == oracle; faults engaged (non-vacuous) |
 | `test_join_skew_salt.py` | **(f)** | skewed hot key: same salt → byte-identical + correct; salt is content-neutral yet re-places some key (live routing input) |
-| `test_join_bounded_memory.py` | **(B5)** | `peak_join_bytes<=budget` joining a dest_pid whose duplicated output is 8× the budget; spill engaged; `join_output_rows==n_left*n_right`; measured `tracemalloc` corroboration |
+| `test_join_bounded_memory.py` | **(B5)** | `peak_join_bytes<=budget` joining a dest_pid whose duplicated output is 8× the budget; spill engaged; `join_output_rows==n_left*n_right` |
 | `test_join_benchmark.py` | gates | block counts O(#producer-tasks·P) per side, not M×R; counts row-count-independent (no per-row messages); broadcast crossover measured from the rule |
 
 ## Pinned execution contract (test-author decisions — the implementer builds `graphed_exec_local.shuffle`)
@@ -64,7 +64,7 @@ a join bug with the oracle. A grouped / list-of-matches / dedup impl produces a 
 | `test_join_survives_a_stolen_producer_task_bit_for_bit` | stolen task's block on the thief, manifest at owner; bytes == clean run + oracle | a merge that depends on which node computed a stolen task |
 | `test_skewed_join_is_deterministic_and_correct` | same salt → byte-identical + relationally correct under ~90% skew | `hash()`-based / nondeterministic routing (drifts across runs) |
 | `test_salt_is_a_live_content_neutral_routing_input` | across salts: identical content, but some salt re-places a key | an impl that IGNORES salt (identical partitioning); one where salt corrupts the join |
-| `test_join_spills_and_streams_within_a_budget_smaller_than_the_output` | `peak_join_bytes<=budget` while output is 8× budget; spill engaged; `join_output_rows==n_left*n_right`; measured tracemalloc ceiling | a full-RAM `concat` (peak==output>budget); a dedup/grouped impl (fewer rows) |
+| `test_join_spills_and_streams_within_a_budget_smaller_than_the_output` | `peak_join_bytes<=budget` while output is 8× budget; spill engaged; `join_output_rows==n_left*n_right` | a full-RAM `concat` (peak==output>budget); a dedup/grouped impl (fewer rows) |
 | `test_block_counts_are_O_producer_tasks_times_P_per_side_not_MxR` | per-side blocks ≤ #producer-tasks·P and < #src·P; T ~ W | the O(#src_pid·P) tiny-fragment M×R blowup |
 | `test_counts_do_not_scale_with_row_count` | 10× rows leaves block/announcement counts unchanged | a per-row-message / per-fragment impl (counts scale with rows) |
 | `test_broadcast_crossover_is_measured_from_the_pinned_rule` | both regimes realised, consistent with the recorded rule | a hard-coded winner / unmeasured crossover |
@@ -76,8 +76,7 @@ announcement faults are forced deterministically (`ShuffleFaults`), so (e) is no
 gate's primary discriminator is the **kernel working-set counter** `peak_join_bytes` — the direct
 mirror of the frozen M39 `peak_writer_buffer_bytes` and M38 `max_frontier`; a whole-process RSS/wall
 gate would be flaky AND cannot isolate the kernel because the joined result is materialised in `.value`.
-The `tracemalloc` peak is asserted only against a **generous full-materialisation ceiling** (result + a
-small multiple of the budget), so it is a real MEASURED corroboration without flakiness. Most themes
+Most themes
 run in-process (`comms="ipc"`).
 
 ## Non-vacuity

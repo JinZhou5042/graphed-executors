@@ -43,3 +43,23 @@ added to catch.
 
 Not routed around: the test is unmodified, its ceiling is unmodified, and no gate was relaxed. The
 branch `ci/per-file-coverage-policy` leaves the failure visible in CI.
+
+## Resolution (owner ruling, 2026-09-22)
+
+Ruling: drop the `tracemalloc` assertion if the kernel counter already discriminates. Measured
+against four kernel mutants in `_join_with_budget` (both adapters; the counters are the other four
+assertions):
+
+| mutant | `peak_join_bytes <= budget` | spill > 0 | rows + oracle | tracemalloc ceiling 1920000 |
+|---|---|---|---|---|
+| full-RAM concat (budget ignored) | FAIL (963200) | FAIL | pass | FAIL (3.45 M) |
+| no `del` after each spill | pass | pass | pass | pass (1.35–1.48 M) |
+| every joined chunk hoarded beside the read-back | pass | pass | pass | FAIL (2.27 M) |
+| every wire hoarded beside the read-back | pass | pass | pass | FAIL (2.28 M) |
+
+The counter refuses the full-RAM concat the test targets. The two hoarding mutants are refused only
+by the tracemalloc line, and their excess (about 1.0 MB, one extra output copy) is smaller than the
+session-state excess the line flakes on (about 1.9 MB), so no ceiling separates a hoarding kernel
+from a noisy session. Dropped, not raised: the frozen gate no longer refuses a kernel that keeps an
+extra copy of the output resident. The m41 sibling (`test_fetch_spill.py`, warm-up guarded) has not
+flaked and is untouched. No `freeze-M40-*` tag exists on origin; the amendment is this commit.

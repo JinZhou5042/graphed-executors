@@ -15,15 +15,10 @@ Witnesses:
   the joined result is materialised in ``.value`` so whole-process RSS cannot isolate the kernel);
 - (spill engaged, non-vacuous) ``witness.join_spilled_partitions > 0``;
 - (real duplication) ``witness.join_output_rows == n_left * n_right`` AND the content equals the
-  duplicating oracle — a dedup / grouped impl emits fewer rows and fails;
-- (MEASURED corroboration) a ``tracemalloc`` peak taken around ``run_join`` stays below a generous
-  full-materialisation ceiling (result + a small multiple of the budget), so a grossly wasteful impl
-  that buffers many copies is caught by a real measurement too.
+  duplicating oracle — a dedup / grouped impl emits fewer rows and fails.
 """
 
 from __future__ import annotations
-
-import tracemalloc
 
 import pytest
 from join_backends import (
@@ -63,14 +58,9 @@ def test_join_spills_and_streams_within_a_budget_smaller_than_the_output(
     budget = output_bytes // 8  # strictly smaller than the combined joined dest_pid (trap 2)
     assert budget < output_bytes, "the budget must be smaller than the joined dest_pid it covers"
 
-    tracemalloc.start()
-    try:
-        res = run_join(
-            be, left, right, parts, broadcast=False, workers=2, store_root=tmp_path, mem_budget_bytes=budget
-        )
-        _cur, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    res = run_join(
+        be, left, right, parts, broadcast=False, workers=2, store_root=tmp_path, mem_budget_bytes=budget
+    )
 
     w = res.witness
     # (kernel working set) the streaming/spill gate — a full-RAM concat reports peak == output > budget.
@@ -81,7 +71,3 @@ def test_join_spills_and_streams_within_a_budget_smaller_than_the_output(
     # (real duplication) every matching pair produced a row; content equals the duplicating oracle.
     assert w.join_output_rows == _N_LEFT * _N_RIGHT, "relational duplication must emit n_left*n_right rows"
     assert observed_join_all(adapter, res.value) == oracle
-    # (MEASURED corroboration) a real tracemalloc peak below a generous full-materialisation ceiling.
-    assert peak <= output_bytes + 4 * budget, (
-        f"measured peak {peak} exceeded the full-materialisation ceiling"
-    )
