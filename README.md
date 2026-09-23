@@ -111,6 +111,31 @@ The `[taskvine]` extra installs the Python adapter dependency, but not CCTools i
 Direct HTCondor/Slurm submission isn't supported; use a TaskVine factory,
 dask-jobqueue, or a parsl provider to reach those batch systems.
 
+### On TaskVine
+
+[`examples/taskvine_basic.py`](examples/taskvine_basic.py) builds a small `Plan` and passes it to
+`TaskVineExecutor.run(plan)`. Run it without a worker first:
+
+```bash
+python examples/taskvine_basic.py                 # prints 8
+```
+
+For a real worker on the same host, start the manager in one terminal and the worker in another:
+
+```bash
+python examples/taskvine_basic.py --cluster --port 9123
+vine_worker --cores 1 localhost 9123
+```
+
+Activate the same Python environment in both terminals. It needs a CCTools build with VineGraph
+and this `graphed-executors` package. To run your own analysis, replace the example's `Plan`
+with one produced by graphed and keep the same `TaskVineExecutor.run(plan)` call.
+
+This repository owns the TaskVine backend and its public interface. New HEP workflows, comparison
+pipelines, and measured results are maintained in
+[`cooperative-computing-lab/graphed-taskvine/baselines`](https://github.com/cooperative-computing-lab/graphed-taskvine/tree/master/baselines),
+which imports this backend rather than copying its implementation.
+
 ### On a dask cluster
 
 Needs `graphed-executors[dask]`. Point it at any `distributed.Client` you already have and hand

@@ -14,4 +14,6 @@ dist/
 build/
 _build/
 docs/generated/
+vine-graph-work/
+vine-run-info/
 .DS_Store
