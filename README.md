@@ -17,6 +17,7 @@ a dask cluster, or on a parsl HTEX pool — you change the runner, not the analy
 pip install graphed-executors            # laptop runners; pulls graphed
 pip install "graphed-executors[dask]"    # + the dask.distributed backend
 pip install "graphed-executors[parsl]"   # + the parsl backend
+pip install "graphed-executors[taskvine]" # + TaskVine adapter dependencies
 ```
 
 Installing from source builds `graphed`'s Rust core, so you need a Rust toolchain; a plain
@@ -98,12 +99,17 @@ be module-level functions the workers can import — a lambda or a notebook-cell
 | A many-core machine where the worker count strains the open-file limit | `PinnedPoolExecutor` | `graphed_executors.local` |
 | A dask cluster (local, dask-jobqueue, Kubernetes, …) | `dask_runner(client)` | `graphed_executors.dask_backend` |
 | A parsl HTEX pool | `parsl_runner(executor)` | `graphed_executors.parsl_backend` |
+| A TaskVine cluster | `TaskVineExecutor()` | `graphed_executors.taskvine_backend` |
 
 (`import graphed_exec_local` still works as a deprecated alias for `graphed_executors.local`;
 use the namespaced form in new code.)
 
-TaskVine and direct HTCondor/Slurm submission aren't supported; use dask-jobqueue or parsl's
-providers to reach those batch systems.
+The TaskVine backend requires a CCTools build that provides
+`ndcctools.taskvine.vine_graph` and the `vine_worker` executable. Install this
+`graphed-executors` package in the worker environment as well as on the driver.
+The `[taskvine]` extra installs the Python adapter dependency, but not CCTools itself.
+Direct HTCondor/Slurm submission isn't supported; use a TaskVine factory,
+dask-jobqueue, or a parsl provider to reach those batch systems.
 
 ### On a dask cluster
 

@@ -49,6 +49,7 @@ dask = ["dask[distributed]>=2026.6"]
 # was verified against. Deliberately NO python_version marker — the CI axis (gate 3.12, observe 3.13,
 # exclude 3.14/3.14t), not the metadata, is the tested-support fence (plan §4).
 parsl = ["parsl>=2026.7.20"]
+taskvine = ["cloudpickle>=3"]
 
 [project.urls]
 Homepage = "https://github.com/graphed-org/graphed-executors"
