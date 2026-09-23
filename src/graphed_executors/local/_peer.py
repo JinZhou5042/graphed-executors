@@ -31,9 +31,11 @@ from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Generic, TypeVar
 
+from graphed.core import RunControl, RunState
 from graphed.core.execution import LocalResources, Partition, TaskEvent, TaskPhase, partition_label
 from graphed.debug import StageError
 
+from ._reduce import LazyReducer, running_fold
 from ._transport import HttpTransport, QueueTransport
 
 R = TypeVar("R")
@@ -188,6 +190,14 @@ class PeerReducer(Generic[R]):
         self.peer_recvs = 0  # peer nodes consumed (witness: hand-offs were actually received)
         self.root: R | None = None
         self.have_root = False
+        self.forward = False  # after a cancel: every node goes to the driver instead of settling
+
+    def hand_in(self) -> list[tuple[int, int, R]]:
+        """Stop settling (a cancel): return the parked nodes and forward every later one to the driver."""
+        self.forward = True
+        parked = [(level, pos, value) for (level, pos), value in self._present.items()]
+        self._present.clear()
+        return parked
 
     def _level_size(self, level: int) -> int:
         return (self.n + (1 << level) - 1) >> level
@@ -199,6 +209,9 @@ class PeerReducer(Generic[R]):
         """Place a node and bubble it up: combine with present siblings, route odd nodes owned by a
         peer to that peer, park nodes still missing a sibling. Same (level,pos)/left-right rule as the
         flat tree, so the grouping is identical regardless of who runs the combine or when."""
+        if self.forward:
+            self._t.send(DRIVER, ("item", level, pos, value))
+            return
         present = self._present
         while True:
             if self._level_size(level) == 1:  # the global root (worker 0 only ever reaches it)
@@ -380,6 +393,80 @@ def release_workers(transport: Any) -> None:
             threading.Thread(target=fire, args=(dest,), name=f"graphed-release-{dest}", daemon=True).start()
 
 
+_TAGS = {RunState.RUNNING: "resume", RunState.PAUSED: "pause", RunState.CANCELLED: "cancel"}
+
+
+class PeerControl(Generic[R]):
+    """The driver side of a controlled peer run (plan-A2 A2-2), used on every driver poll.
+
+    :meth:`relay` tells every worker a state change, through one :class:`_Outbox` per destination (a
+    worker that stopped reading parks only its own sender; one thread keeps pause→resume in order), or
+    inline on an :class:`HttpTransport`, whose sends are already off-thread. :meth:`take` collects the
+    workers' cancel hand-ins and folds them once they cover every processed leaf."""
+
+    def __init__(
+        self,
+        control: RunControl,
+        transport: Any,
+        n: int,
+        combine: Callable[[R, R], R],
+        empty: Callable[[], R],
+    ) -> None:
+        self._control = control
+        self._t = transport
+        self._workers = transport.peers()
+        self._n = n
+        self._combine = combine
+        self._empty = empty
+        self._told = RunState.RUNNING  # the workers start running
+        self._outboxes: dict[str, _Outbox] = {}
+        self._processed: dict[str, int] = {}  # per worker, from its `cancelled` hand-in
+        self._items: dict[tuple[int, int], R] = {}  # one frontier item per node
+        self._covered = 0
+
+    def relay(self) -> bool:
+        """Send the workers the control's state if it changed; True while PAUSED."""
+        state = self._control.state
+        if state is not self._told and self._told is not RunState.CANCELLED:
+            self._told = state
+            if not self._outboxes and not isinstance(self._t, HttpTransport):
+                self._outboxes = {dest: _Outbox(self._t) for dest in self._workers}
+            for dest in self._workers:
+                self._outboxes.get(dest, self._t).send(dest, (_TAGS[state],))
+        return state is RunState.PAUSED
+
+    def take(self, payload: Any) -> tuple[R, int] | None:
+        """Consume a hand-in message; once complete, the fold of the completed leaves and their count.
+
+        Items cover completed leaves only, each at most once, so covered == processed means every
+        completed leaf is in hand."""
+        if payload[0] == "cancelled":
+            _, address, processed, parked = payload
+            self._processed[address] = processed  # a worker sends one; a retried copy is identical
+            for level, pos, value in parked:
+                self._add(level, pos, value)
+        elif payload[0] == "item":
+            self._add(*payload[1:])
+        if len(self._processed) < len(self._workers) or self._covered != sum(self._processed.values()):
+            return None
+        # The fixed tree first, so sibling nodes the workers stopped settling combine as it combines them.
+        tree: LazyReducer[R] = LazyReducer(self._n, self._combine, self._empty)
+        for (level, pos), value in self._items.items():
+            tree.feed(pos, value, level)
+        return running_fold(iter(tree.frontier()), self._combine, self._empty)[0], self._covered
+
+    def _add(self, level: int, pos: int, value: R) -> None:
+        if (level, pos) not in self._items:
+            self._items[(level, pos)] = value
+            self._covered += min((pos + 1) << level, self._n) - (pos << level)
+
+    def close(self, timeout: float) -> None:
+        """Stop the senders, waiting up to ``timeout`` each for queued tags; call before ``done``."""
+        for box in self._outboxes.values():
+            box.close(timeout)
+        self._outboxes.clear()
+
+
 def slice_items(
     partitions: Sequence[Partition], bounds: list[int], worker_addresses: tuple[str, ...]
 ) -> dict[str, list[tuple[int, Partition]]]:
@@ -431,6 +518,7 @@ def process_and_reduce(
     # victims this worker may steal from: the bounded lifeline overlay when given (O(log N), so the IPC
     # registry stays sub-quadratic), else every peer (the in-process / full-mesh case).
     peers = steal_peers if steal_peers is not None else tuple(a for a in worker_addresses if a != address)
+    me = worker_addresses.index(address)
     stats = {"steals": 0, "given": 0, "asked": 0, "processed": 0}  # asked: steal-requests I sent
     victim = 0
     idle_since: float | None = None  # when this worker ran out of local work (gates the steal delay)
@@ -438,6 +526,7 @@ def process_and_reduce(
     next_steal_at = 0.0  # monotonic time of the next allowed steal-request
     pending = list(prebuffered)
     done = False
+    paused = cancelled = False  # the driver's run-control tags (plan-A2 A2-2)
     events: list[TaskEvent] = []  # M37 monitor events, batched to the driver off the hot path
 
     def emit_event(phase: TaskPhase, leaf: int, part: Partition, error: str | None = None) -> None:
@@ -474,7 +563,7 @@ def process_and_reduce(
             reducer.settle(0, leaf, value)
 
     def handle(payload: Any) -> None:
-        nonlocal done
+        nonlocal done, paused, cancelled
         tag = payload[0]
         if tag == "node":
             _, lvl, pos, val = payload
@@ -491,16 +580,29 @@ def process_and_reduce(
             # makespan for our coarse, independent partitions. Steal-one lets k thieves each take one
             # leaf fairly with no cascade; steals are cheap relative to a partition, so the extra
             # steal attempts cost ~nothing. (`len > 1`: never give away the leaf I'm about to run.)
+            # Each grant carries its own id (a negative level, never a node's), so the thief keeps a
+            # response retried by an at-least-once transport once, and a leaf granted twice twice.
             thief = payload[1]
             if steal and len(mine) > 1:
                 stats["given"] += 1
-                outbox.send(thief, ("steal_resp", [mine.pop()]))
+                outbox.send(thief, ("steal_resp", [mine.pop()], (-1 - me, stats["given"])))
             else:
-                outbox.send(thief, ("steal_resp", []))
+                outbox.send(thief, ("steal_resp", [], (-1 - me, 0)))
         elif tag == "steal_resp":
-            granted = payload[1]
-            mine.extend(granted)
-            stats["steals"] += len(granted)
+            _, granted, grant = payload
+            if grant not in seen:
+                seen.add(grant)
+                mine.extend(granted)
+                stats["steals"] += len(granted)
+        elif tag == "pause":
+            paused = True
+        elif tag == "resume":
+            paused = False
+        elif tag == "cancel" and not cancelled:
+            # Between leaves, so nothing is in flight here: hand in the count and the parked nodes.
+            cancelled = True
+            mine.clear()
+            outbox.send(DRIVER, ("cancelled", address, stats["processed"], reducer.hand_in()))
         elif tag == "done":
             done = True
 
@@ -520,7 +622,7 @@ def process_and_reduce(
                 with contextlib.suppress(Exception):
                     ship_profile(profiler.flush())
                 last_flush = time.monotonic()
-            if mine:
+            if mine and not (paused or cancelled):
                 idle_since = None  # have work again (incl. a successful steal) -> reset steal backoff
                 backoff = STEAL_DELAY
                 leaf, part = mine.popleft()
@@ -541,7 +643,7 @@ def process_and_reduce(
                     settle_leaf(leaf, partial)  # my leaf -> reduce here
                 else:
                     outbox.send(owner(leaf), ("leaf", leaf, partial))  # stolen -> back to its owner
-            elif steal and peers:
+            elif steal and peers and not (paused or cancelled):
                 # no local work: request a steal once idle past STEAL_DELAY, then back off on each
                 # denial so a balanced run's reduction tail isn't flooded with steal-requests.
                 now = time.monotonic()

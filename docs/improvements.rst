@@ -40,3 +40,9 @@ What does not work yet, and what to do instead.
 - **No free-threaded CPython (3.14t) on the dask path.** ``distributed`` declares support up to
   3.14 and nothing about free-threading. The local executors run on 3.14t; on a dask cluster, use
   standard CPython.
+
+- **Run control stops at the local executors.** ``control=`` (pause, resume, cancel) is honoured
+  by ``ThreadExecutor``, ``ProcessPoolExecutor`` and ``PinnedPoolExecutor``. The dask and parsl
+  plan routes that merge worker to worker (``transport_run_plan``, ``parsl_run_plan``) and the
+  exchange engines take no control and emit no task events, so the dashboard cannot see or steer
+  them; stop such a run by interrupting it.

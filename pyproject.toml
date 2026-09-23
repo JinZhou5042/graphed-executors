@@ -62,7 +62,7 @@ exclude = ["CLAUDE.md", ".graphed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "tests/frozen/m7", "tests/frozen/m10", "tests/frozen/m31", "tests/frozen/m34", "tests/frozen/m37"]
+pythonpath = ["src", "tests/frozen/m7", "tests/frozen/m10", "tests/frozen/m31", "tests/frozen/m34", "tests/frozen/m37", "tests/frozen/m65"]
 addopts = "-q"
 
 [tool.coverage.run]
@@ -133,7 +133,7 @@ files = ["src", "tests"]
 mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54"]
 explicit_package_bases = true
 
-# Read-only helpers under tests/frozen/{m44,m47,m63} that tests/extra imports by bare basename: pytest
+# Read-only helpers under tests/frozen/{m44,m47,m63,m65} that tests import by bare basename: pytest
 # puts them on sys.path, mypy knows them only as tests.frozen.mXX.<name>. They stay type-checked
 # under those dotted names; only the import site is Any.
 [[tool.mypy.overrides]]
@@ -141,6 +141,7 @@ module = [
   "transport_harness",
   "parsl_transport_harness",
   "m63_harness",
+  "m65a_probe",
 ]
 ignore_missing_imports = true
 

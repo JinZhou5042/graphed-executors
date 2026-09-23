@@ -392,6 +392,61 @@ result and its merge count are byte-identical whether a monitor is attached, abs
 throwing.
 
 
+Pausing and cancelling a run
+----------------------------
+
+A monitor watches; a ``graphed.core.RunControl`` steers. Every local executor takes
+``control=`` (or has its public ``control`` attribute set, which is what
+``Dashboard(control=True).attach(executor)`` does) and follows the contract in graphed's
+*Pausing and cancelling a run*: pause starts no new task, cancel starts none, waits for what
+was submitted and returns the fold of the tasks that completed with
+``stopped=StopReason.CANCELLED``, and a failure while it drains raises as it would without a
+control. A cancel ends one plan, the one running when it fires (or the next to start); plans
+queued behind it by ``submit`` run as usual.
+
+.. code-block:: python
+
+    import time
+
+    from graphed.core import Partition, Plan, RunControl, Task
+    from graphed_executors.local import ThreadExecutor
+
+    ctl = RunControl()
+
+    def process(part, resources):
+        if part.entry_start == 3:
+            ctl.cancel()                          # stands in for the dashboard's cancel button
+        time.sleep(0.01)
+        return 1
+
+    tasks = [Task(k, Partition(f"f{k}.root", "Events", k, k + 1)) for k in range(100)]
+    plan = Plan(process=process, combine=lambda a, b: a + b, empty=lambda: 0, tasks=tasks)
+    res = ThreadExecutor(max_workers=2, control=ctl).run(plan)
+    print(res.stopped, res.value == res.n_partitions < 100, ctl.state)
+
+which prints::
+
+    cancelled True running
+
+Where the executor looks at the control depends on who merges:
+
+* **Hub** (``comms=None``, with or without ``pooled_combines``) and **adaptive** plans: without a
+  control every task goes to the pool at once. With one, the driver hands out at most
+  ``max_workers`` tasks at a time and refills a slot as a task finishes, only while the control
+  is ``RUNNING``, so a pause holds everything not yet handed out. A process pool may already
+  have queued up to ``max_workers`` of them, and those still start.
+* **Peer** (``comms="ipc"``/``"http"``, and ``PinnedPoolExecutor``): the driver passes each state
+  change to every worker, and a worker acts on it between two of its own tasks. On a cancel each
+  worker hands the driver its finished pieces of the merge tree, and the driver merges them.
+  A peer run's root deadline counts only time spent running, so a long pause never times it out.
+
+On the fixed-tree and peer routes, a cancelled run's total is the fixed merge tree over the tasks
+that finished: every merge whose two inputs completed runs, and the pieces left over are added in
+leaf order; a run never cancelled gives exactly the total it gives without a control. On the
+adaptive route, a cancelled run's total, like an uncancelled one's, adds the partials in the order
+they finish, so it is reproducible only when the partials add exactly (integers, counts).
+
+
 .. _design-shuffle-graph:
 
 Moving data between steps, and what it costs

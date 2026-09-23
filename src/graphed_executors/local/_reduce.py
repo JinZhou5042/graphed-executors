@@ -125,10 +125,11 @@ class LazyReducer(Generic[R]):
     def _level_size(self, level: int) -> int:
         return (self.n + (1 << level) - 1) >> level
 
-    def feed(self, leaf: int, value: R) -> None:
-        """Deliver one partial (leaf index + value), bubbling it up as far as siblings allow."""
+    def feed(self, leaf: int, value: R, level: int = 0) -> None:
+        """Deliver one partial (leaf index + value), or with ``level`` a whole node at ``(level, leaf)``,
+        bubbling it up as far as siblings allow."""
         self.delivered += 1
-        level, pos = 0, leaf
+        pos = leaf
         present = self._present
         while True:
             if self._level_size(level) == 1:  # reached the root
@@ -153,6 +154,10 @@ class LazyReducer(Generic[R]):
             level, pos = level + 1, pos >> 1
         if len(present) > self.max_frontier:
             self.max_frontier = len(present)
+
+    def frontier(self) -> list[tuple[int, R]]:
+        """The parked nodes as ``(first leaf, value)`` in leaf order: the root alone once every leaf is in."""
+        return sorted(((pos << level, v) for (level, pos), v in self._present.items()), key=lambda p: p[0])
 
     def result(self) -> R:
         """The reduced value. Valid once all ``n`` leaves have been fed (the root has formed)."""
