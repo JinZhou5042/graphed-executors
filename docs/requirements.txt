@@ -1,5 +1,5 @@
-# Read the Docs installs `graphed` from git rather than PyPI so the rendered API reference follows
-# graphed's main; the pin lives in this file (CI's docs job pins its own sha in ci.yml).
+# `graphed` is pinned to the same release CI installs (env.GRAPHED in ../.github/workflows/ci.yml)
+# so the rendered API reference matches the version these pages were written against.
 # The [awkward,numpy] extras supply the backends that graphed-executors' autosummary imports at
-# doc-build time; the Rust toolchain declared in ../.readthedocs.yaml builds the extension.
-graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@main
+# doc-build time.
+graphed[awkward,numpy]==0.0.5
