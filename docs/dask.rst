@@ -92,6 +92,8 @@ Four things that save an afternoon:
   deterministic exception in your ``process`` runs four times before it reaches you — pass
   ``retries=0`` while debugging and it surfaces on the first attempt.
 * Leaving the ``with`` block closes the runner, not your client. You built the cluster; you own it.
+* ``runner.submit(plan)`` returns a future and runs the plan while you record the next one;
+  ``dask_runner(client, max_in_flight=2)`` bounds how many submitted plans may be unfinished.
 
 A plan with ``next_tasks`` runs on the adaptive path here exactly as it does on your laptop. A
 worker exception comes back intact — see `When things fail`_.

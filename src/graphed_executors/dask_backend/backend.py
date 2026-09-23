@@ -129,7 +129,12 @@ class DaskBackend:
 
 
 def dask_runner(
-    client: Any, *, monitor: Any = None, retries: int = 3, replicate_broadcast: bool = False
+    client: Any,
+    *,
+    monitor: Any = None,
+    retries: int = 3,
+    replicate_broadcast: bool = False,
+    max_in_flight: int = 2,
 ) -> SubmitRunner:
     """The user-facing one-liner: register the per-worker plugin on ``client`` and return a
     :class:`SubmitRunner` over a :class:`DaskBackend`. ``close()`` does NOT close the caller's client.
@@ -139,4 +144,4 @@ def dask_runner(
 
     client.register_plugin(GraphedWorkerPlugin())
     backend = DaskBackend(client, replicate_broadcast=replicate_broadcast)
-    return SubmitRunner(backend, monitor=monitor, retries=retries)
+    return SubmitRunner(backend, monitor=monitor, retries=retries, max_in_flight=max_in_flight)

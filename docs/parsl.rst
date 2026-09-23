@@ -127,6 +127,9 @@ Two ownership rules: leaving the ``with`` block closes the runner but **not** yo
 ``stop_htex`` is what actually reaps the interchange, manager and worker processes. Skip it and
 you leak processes and ports.
 
+``runner.submit(plan)`` returns a future and runs the plan while you record the next one;
+``parsl_runner(executor, max_in_flight=2)`` bounds how many submitted plans may be unfinished.
+
 An exception raised inside your ``process`` comes back whole — see `When things fail`_.
 
 

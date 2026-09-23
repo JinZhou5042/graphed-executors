@@ -131,6 +131,7 @@ jobs:
         # source and gate the moved m43 engine by ZERO jobs. The `.coveragerc-dask` source is authoritative.
         run: |
           pytest tests/frozen/m42 tests/frozen/m43 tests/frozen/m44 tests/frozen/m45 \
+            tests/frozen/m63/test_m63_submit_dask.py \
             tests/extra/m43 tests/extra/m44 \
             --cov-config=.coveragerc-dask \
             --cov-branch --cov \
@@ -207,6 +208,7 @@ jobs:
         run: |
           python -c "import sysconfig, pathlib; pathlib.Path(sysconfig.get_path('purelib'), 'graphed_subcov.pth').write_text('import coverage; coverage.process_startup()\n')"
           pytest tests/frozen/m46 tests/frozen/m47 tests/extra/m47 \
+            tests/frozen/m63/test_m63_submit_parsl.py \
             --cov --cov-config=.coveragerc-parsl \
             --cov-branch --cov-fail-under=0
           # settle: force any lingering HTEX pool workers to flush their subprocess coverage

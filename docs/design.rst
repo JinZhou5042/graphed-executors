@@ -242,6 +242,58 @@ or by leaving the ``with`` block:
 
    # [array([400]), array([800]), array([1200])]
 
+An executor runs one plan at a time: a second ``run()`` from another thread waits until the first
+returns, because the kept pool and the peer state belong to the executor, not to the run.
+
+Recording the next plan while this one runs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Recording and compiling a plan is serial driver work, and during ``run()`` the driver only waits.
+``submit(plan)`` hands the plan to a driver thread and returns a ``concurrent.futures.Future``
+at once, so the next plan is recorded while this one executes. ``future.result()`` is exactly
+``run(plan)``: the same value, the same exception (a worker's ``StageError`` intact), the same
+retries and the same monitor events. Plans still execute one at a time, in submit order.
+
+``max_in_flight`` (default 2) bounds the submitted plans not yet finished, the running one
+included, and ``submit`` blocks at the bound; 2 lets the driver keep one recorded plan in hand.
+Cancelling a queued future frees its slot. ``close()``, or leaving the ``with`` block, waits for
+every submitted plan before it releases the pool; a local executor accepts ``submit`` again after
+it. Every executor and runner here has it — the local pools and ``SubmitRunner`` on any backend:
+
+.. code-block:: python
+
+   import numpy as np
+   from graphed.core import Partition, Plan, Task
+   from graphed_executors.local import ProcessPoolExecutor
+
+   def count(partition, resources):
+       return np.asarray([partition.entry_stop - partition.entry_start])
+
+   def add(a, b):
+       return a + b
+
+   def zero():
+       return np.zeros(1, dtype=int)
+
+   def build(n):  # stands in for recording and compiling an analysis
+       return Plan(process=count, combine=add, empty=zero,
+                   tasks=tuple(Task(i, Partition("data", "Events", i * n, (i + 1) * n))
+                               for i in range(4)))
+
+   if __name__ == "__main__":
+       with ProcessPoolExecutor(max_workers=4, persistent=True) as ex:
+           futures = [ex.submit(build(n)) for n in (100, 200, 300)]
+           print([f.result().value for f in futures])
+
+   # [array([400]), array([800]), array([1200])]
+
+Three traps. Calling ``submit`` or ``.result()`` from a monitor callback or from inside a plan's
+``process`` on the same executor waits on its own driver thread and never returns. And
+``ThreadExecutor``/``ThreadBackend`` overlap recording with running only where the kernels
+release the GIL; a process pool or a cluster overlaps regardless. A process pool fails plans still
+unwaited at interpreter exit, so take every ``.result()``, call ``close()`` or leave the ``with``
+block first.
+
 When an idle worker takes work from a busy one
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -322,6 +374,8 @@ Every executor takes an optional ``monitor=``. It is a passive observer implemen
 ``graphed.core.execution.Monitor``; the executor knows nothing about rendering or transport and
 only emits a small vocabulary of ``TaskEvent`` records. ``graphed.debug.Dashboard`` is one
 consumer of them.
+The monitor is also a public ``monitor`` attribute on every executor and runner, read when a plan
+starts, so ``Dashboard.attach(executor)`` (which assigns it) reaches the next plan anywhere.
 
 One task is three events. The driver emits ``SUBMITTED`` when it hands the task to the pool; the
 worker emits ``STARTED`` before running it and exactly one of ``FINISHED`` or ``ERRORED`` after.

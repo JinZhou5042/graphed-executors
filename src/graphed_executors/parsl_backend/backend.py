@@ -211,8 +211,10 @@ class ParslBackend:
         return None
 
 
-def parsl_runner(executor: Any, *, monitor: Any = None, retries: int = 3) -> SubmitRunner:
+def parsl_runner(
+    executor: Any, *, monitor: Any = None, retries: int = 3, max_in_flight: int = 2
+) -> SubmitRunner:
     """The user-facing one-liner: a :class:`SubmitRunner` over a :class:`ParslBackend` on a started
     parsl executor. ``close()`` does NOT shut the caller's executor down (the launch helper documents
     teardown via ``stop_htex``)."""
-    return SubmitRunner(ParslBackend(executor), monitor=monitor, retries=retries)
+    return SubmitRunner(ParslBackend(executor), monitor=monitor, retries=retries, max_in_flight=max_in_flight)

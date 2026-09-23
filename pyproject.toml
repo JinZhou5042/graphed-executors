@@ -133,13 +133,14 @@ files = ["src", "tests"]
 mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54"]
 explicit_package_bases = true
 
-# Read-only helpers under tests/frozen/{m44,m47} that tests/extra imports by bare basename: pytest
+# Read-only helpers under tests/frozen/{m44,m47,m63} that tests/extra imports by bare basename: pytest
 # puts them on sys.path, mypy knows them only as tests.frozen.mXX.<name>. They stay type-checked
 # under those dotted names; only the import site is Any.
 [[tool.mypy.overrides]]
 module = [
   "transport_harness",
   "parsl_transport_harness",
+  "m63_harness",
 ]
 ignore_missing_imports = true
 

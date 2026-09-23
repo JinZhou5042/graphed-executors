@@ -14,7 +14,9 @@ Run a plan
 (``plan_tree``, ``tree_reduce``, ``running_fold``) underneath them. The two cluster modules
 give you a one-line runner each — ``dask_runner(client)`` and ``parsl_runner(executor)`` —
 and are importable only with their extra installed (``[dask]``, ``[parsl]``). Importing
-either module does *not* import dask or parsl; that happens when you construct a runner.
+either module does *not* import dask or parsl; that happens when you construct a runner. Every executor
+and runner has ``run(plan)`` and ``submit(plan)``, which returns a future so you can record the
+next plan while this one runs.
 
 .. autosummary::
    :toctree: generated
