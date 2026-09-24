@@ -1,9 +1,0 @@
-# The main matrix has no VineGraph build and excludes this optional backend.
-# The dedicated Conda job builds CCTools and gates these files here.
-[run]
-branch = true
-source = graphed_executors.taskvine_backend
-
-[report]
-fail_under = 90
-show_missing = true

@@ -69,14 +69,14 @@ addopts = "-q"
 [tool.coverage.run]
 branch = true
 source = ["graphed_executors"]
-# The main matrix installs neither dask, parsl, nor VineGraph (`.[dev]`), so backend tests importorskip
-# out and their source would otherwise register as ~0% and sink the whole-package gate. They are
-# covered instead by the dedicated `test-dask`, `test-parsl`, and `test-taskvine` CI jobs (their own
-# `.coveragerc-*` files, per-module sources, 90% gates; each `common/` module gates on exactly one
-# job). `submit/` carries no omit: the ThreadBackend
+# The main matrix installs neither dask nor parsl (`.[dev]`), so every backend test importorskips
+# out and `graphed_executors.{dask_backend,common,parsl_backend}` would otherwise register as ~0%
+# and sink the whole-package gate. They are covered instead by the dedicated `test-dask` /
+# `test-parsl` CI jobs (their own `.coveragerc-*`, per-module sources, 90% — the §B.3 diff-coverage
+# gate; each `common/` module gated by exactly ONE job). `submit/` carries no omit: the ThreadBackend
 # conformance half exercises it in the main matrix. This is the omit-because-gated-elsewhere pattern
 # (m46 IT4) — NOT a fail_under change.
-omit = ["*/dask_backend/*", "*/common/*", "*/parsl_backend/*", "*/taskvine_backend/*"]
+omit = ["*/dask_backend/*", "*/common/*", "*/parsl_backend/*"]
 
 [tool.coverage.report]
 fail_under = 90

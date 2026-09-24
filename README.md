@@ -108,37 +108,9 @@ The TaskVine backend requires a CCTools build that provides
 `ndcctools.taskvine.vine_graph` and the `vine_worker` executable. Install this
 `graphed-executors` package in the worker environment as well as on the driver.
 The `[taskvine]` extra installs the Python adapter dependency, but not CCTools itself.
+Build the CCTools `task-graph` branch using its [source installation guide](https://github.com/JinZhou5042/cctools/blob/task-graph/doc/manuals/install/index.md#install-from-github).
 Direct HTCondor/Slurm submission isn't supported; use a TaskVine factory,
 dask-jobqueue, or a parsl provider to reach those batch systems.
-
-### Build VineGraph in a Conda environment
-
-VineGraph currently lives on the CCTools `task-graph` development branch. The
-released `ndcctools` package may not provide `ndcctools.taskvine.vine_graph`.
-Build CCTools in its own Conda environment, then install this executor in that
-same environment on the driver and workers:
-
-```bash
-git clone --branch task-graph --single-branch https://github.com/JinZhou5042/cctools.git cctools-src
-cd cctools-src
-unset PYTHONPATH
-conda env create -y -f environment.yml
-conda install -y -n cctools-dev --override-channels -c conda-forge --strict-channel-priority python=3.13
-conda activate cctools-dev
-./configure --with-base-dir "$CONDA_PREFIX" --prefix "$CONDA_PREFIX"
-make -j4
-make install
-cd ../graphed-executors
-python -m pip install -e ".[taskvine]"
-python -c "from ndcctools.taskvine.vine_graph import VineGraph, Workflow"
-vine_worker --version
-```
-
-Run this from a checkout of `graphed-executors`; the last `cd` assumes that
-checkout sits beside `cctools-src`. After a release containing this backend,
-`python -m pip install "graphed-executors[taskvine]"` can replace the editable
-install. The [VineGraph guide](https://github.com/JinZhou5042/cctools/blob/task-graph/doc/manuals/taskvine/vine-graph.md)
-covers workers and factories beyond the local example below.
 
 ### On TaskVine
 
