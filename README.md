@@ -132,10 +132,10 @@ Activate the same Python environment in both terminals. It needs a CCTools build
 and this `graphed-executors` package. To run your own analysis, replace the example's `Plan`
 with one produced by graphed and keep the same `TaskVineExecutor.run(plan)` call.
 
-This repository owns the TaskVine backend and its public interface. New HEP workflows, comparison
-pipelines, and measured results are maintained in
-[`cooperative-computing-lab/graphed-taskvine/baselines`](https://github.com/cooperative-computing-lab/graphed-taskvine/tree/master/baselines),
-which imports this backend rather than copying its implementation.
+This repository owns the TaskVine backend and its public interface.
+[`cooperative-computing-lab/graphed-taskvine`](https://github.com/cooperative-computing-lab/graphed-taskvine)
+is the workspace for new HEP workflows and measured results. It imports this backend and does not
+keep a second executor implementation.
 
 ### On a dask cluster
 
