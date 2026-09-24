@@ -1,18 +1,18 @@
-"""A graphed ``Executor`` that runs plans on TaskVine through VineGraph.
+"""A graphed `Executor` that runs plans on TaskVine through VineGraph.
 
-``TaskVineExecutor().run(plan)`` lowers a ``graphed.core.Plan`` into a VineGraph ``Workflow``:
+`TaskVineExecutor().run(plan)` lowers a `graphed.core.Plan` into a VineGraph `Workflow`:
 
-- one leaf task per ``Task`` (``plan.process(partition, resources)``), leaves ordered by key;
-- combine tasks laid out with ``graphed_executors.local.plan_tree`` — the SAME fixed binary tree the
+- one leaf task per `Task` (`plan.process(partition, resources)`), leaves ordered by key;
+- combine tasks laid out with `graphed_executors.local.plan_tree` — the same fixed binary tree the
   reference executors use, so float results are bit-for-bit identical to a local run;
 - a worker failure is captured, short-circuits up the tree, and is re-raised on the driver as the
   original exception (with the remote traceback attached as a note);
-- ``resources.open_once`` is available inside each call. The current TaskVine task-runner forks
+- `resources.open_once` is available inside each call. The current TaskVine task-runner forks
   each call, so opened handles do not persist across tasks yet.
 
-An adaptive plan (``plan.next_tasks``) runs in rounds: each batch from ``next_tasks`` is one
+An adaptive plan (`plan.next_tasks`) runs in rounds: each batch from `next_tasks` is one
 VineGraph run reduced to a single partial on the workers; the driver folds round results in order,
-updates ``ExecContext`` (task counts, events, per-task durations) and checks ``plan.stop`` between
+updates `ExecContext` (task counts, events, per-task durations) and checks `plan.stop` between
 rounds.
 """
 
@@ -59,7 +59,7 @@ class TaskVineWorkerError(RuntimeError):
 
 
 class _GraphedVineGraph(VineGraph):
-    """VineGraph whose task-runner library puts its sandbox on ``sys.path`` before loading."""
+    """VineGraph whose task-runner library puts its sandbox on `sys.path` before loading."""
 
     def build_task_runner_registration(self, py_graph, bridge, hoisting_modules, env_files):
         registration = TaskRunnerRegistration(self)
@@ -79,7 +79,7 @@ class _GraphedVineGraph(VineGraph):
 
 @dataclass
 class RunStats:
-    """Plan-lowering and execution statistics for the most recent ``run``."""
+    """Plan-lowering and execution statistics for the most recent `run`."""
 
     n_tasks: int = 0
     n_graph_nodes: int = 0
@@ -132,16 +132,16 @@ class TaskVineExecutor:
     Parameters
     ----------
     manager_name, port, run_info_path, run_info_template:
-        Passed to the VineGraph manager (created lazily on first ``run``), unless ``manager`` is
-        given. Workers/factories connect by ``manager_name``.
+        Passed to the VineGraph manager (created lazily on first `run`), unless `manager` is
+        given. Workers/factories connect by `manager_name`.
     local:
-        ``True`` runs the lowered Workflow in-process (VineGraph ``local-execute``): no workers,
+        `True` runs the lowered Workflow in-process (VineGraph `local-execute`): no workers,
         same lowering, same reduction tree. For tests and graph-construction benchmarks.
     ship:
         Extra files/directories workers must import (analysis modules referenced by import ref,
-        e.g. a ``"dv5_graphed:make_backend"`` backend). Install this package in the worker environment.
+        e.g. a `"dv5_graphed:make_backend"` backend). Install this package in the worker environment.
     params:
-        Extra VineGraph parameters (``libcores``, ``wait-for-workers``, ``task-priority-mode``, ...).
+        Extra VineGraph parameters (`libcores`, `wait-for-workers`, `task-priority-mode`, ...).
     """
 
     def __init__(

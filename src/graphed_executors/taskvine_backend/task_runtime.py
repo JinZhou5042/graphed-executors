@@ -1,16 +1,16 @@
-"""Private worker-side task bodies for :class:`TaskVineExecutor`.
+"""Private worker-side task bodies for `TaskVineExecutor`.
 
 These functions run inside the VineGraph task-runner library on a TaskVine worker (or in-process
-under ``local-execute``). They are referenced by import from the shipped graph, so the
+under `local-execute`). They are referenced by import from the shipped graph, so the
 graphed-executors package must be installed in the worker environment.
 
 Two VineGraph argument rules shape this module:
 
 - a positional tuple whose first element is callable is evaluated as a legacy dask task, so the
-  plan's callables travel as ONE cloudpickled ``bytes`` blob (a leaf type, never walked or called)
+  plan's callables travel as one cloudpickled `bytes` blob (a leaf type, never walked or called)
   and are unpickled once per library process;
 - dataclasses and tuples inside arguments are walked and copied on every call, so partial results
-  travel wrapped in :class:`Partial` (a plain ``__slots__`` object the walker leaves alone).
+  travel wrapped in `Partial` (a plain `__slots__` object the walker leaves alone).
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def plan_functions(blob):
 
 
 def prime(workflow):
-    """Unpickle every distinct plan blob in ``workflow`` into the cache (library parent process).
+    """Unpickle every distinct plan blob in `workflow` into the cache (library parent process).
 
     Task-runner calls are forked from the library process, so primed functions — and the graphed /
     awkward / uproot imports their unpickling pulls in — are inherited by every call."""
@@ -76,7 +76,7 @@ def prime(workflow):
 
 
 def worker_resources():
-    """Per-process ``open_once`` cache.
+    """Per-process `open_once` cache.
 
     Calls are forked from the library process, so a handle opened inside one call is not seen by the
     next: under TaskVine this is per-call, not per-worker, file locality (same as the old adaptor)."""
@@ -97,7 +97,7 @@ def _capture(exc, key):
 
 
 def run_leaf(blob, key, partition, collect_durations):
-    """Run ``plan.process`` on one partition."""
+    """Run `plan.process` on one partition."""
     t0 = time.perf_counter()
     try:
         process, _combine, _empty = plan_functions(blob)
@@ -109,7 +109,7 @@ def run_leaf(blob, key, partition, collect_durations):
 
 
 def run_combine(blob, left, right):
-    """Run ``plan.combine`` on two subtrees; a failure below short-circuits (left first)."""
+    """Run `plan.combine` on two subtrees; a failure below short-circuits (left first)."""
     if left.error is not None:
         return left
     if right.error is not None:
