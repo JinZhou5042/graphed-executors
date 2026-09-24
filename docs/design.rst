@@ -395,9 +395,9 @@ throwing.
 Pausing and cancelling a run
 ----------------------------
 
-A monitor watches; a ``graphed.core.RunControl`` steers. Every local executor takes
-``control=`` (or has its public ``control`` attribute set, which is what
-``Dashboard(control=True).attach(executor)`` does) and follows the contract in graphed's
+A monitor watches; a ``graphed.core.RunControl`` steers. Every local executor and ``SubmitRunner``
+takes ``control=``; the runner ``dask_runner`` and ``parsl_runner`` return has its public ``control``
+attribute set instead, which is what ``Dashboard(control=True).attach(executor)`` does. Each follows the contract in graphed's
 *Pausing and cancelling a run*: pause starts no new task, cancel starts none, waits for what
 was submitted and returns the fold of the tasks that completed with
 ``stopped=StopReason.CANCELLED``, and a failure while it drains raises as it would without a
@@ -439,6 +439,18 @@ Where the executor looks at the control depends on who merges:
   change to every worker, and a worker acts on it between two of its own tasks. On a cancel each
   worker hands the driver its finished pieces of the merge tree, and the driver merges them.
   A peer run's root deadline counts only time spent running, so a long pause never times it out.
+* **SubmitRunner** (thread, dask and parsl backends), fixed and adaptive plans: with a control, the driver
+  hands out at most as many tasks as the backend has task slots (``task_slots()`` where the backend has it:
+  the dask cluster's threads, the connected parsl HTEX workers or the parsl thread pool's size;
+  else ``n_workers()``), and at least one, so a pool that starts with no workers runs one task
+  until workers join. While it holds tasks the driver wakes every 50 ms and, when every slot is
+  busy, reads the slot count again, so it widens as workers join and a resume starts tasks without
+  waiting for one to finish. A merge is submitted only once both of its inputs have finished. On
+  dask every task depends on the broadcast plan function, and dask runs a task where its input
+  lives, so a controlled dask run should use ``dask_runner(client, replicate_broadcast=True)``;
+  without it, tasks queue on the worker holding the broadcast while other slots stay idle. Like
+  ``monitor``, ``control`` is read when a plan starts, so assigning it mid-run takes effect from
+  the next plan.
 
 On the fixed-tree and peer routes, a cancelled run's total is the fixed merge tree over the tasks
 that finished: every merge whose two inputs completed runs, and the pieces left over are added in

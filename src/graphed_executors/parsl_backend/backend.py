@@ -133,6 +133,11 @@ class ParslBackend:
             )
         return total
 
+    def task_slots(self) -> int:
+        """Tasks the executor runs at once, without :meth:`n_workers`' wait: 0 on an HTEX with no
+        manager connected yet."""
+        return self._count_htex_workers() if self._is_htex else int(self._executor.max_threads)
+
     def _count_htex_workers(self) -> int:
         return sum(
             int(m["worker_count"])

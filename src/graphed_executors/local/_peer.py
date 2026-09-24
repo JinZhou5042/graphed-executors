@@ -524,7 +524,7 @@ def process_and_reduce(
     idle_since: float | None = None  # when this worker ran out of local work (gates the steal delay)
     backoff = STEAL_DELAY  # current wait between steal-requests; grows on denial, resets on a grant
     next_steal_at = 0.0  # monotonic time of the next allowed steal-request
-    pending = list(prebuffered)
+    pending = [payload for _sender, payload in prebuffered]
     done = False
     paused = cancelled = False  # the driver's run-control tags (plan-A2 A2-2)
     events: list[TaskEvent] = []  # M37 monitor events, batched to the driver off the hot path
