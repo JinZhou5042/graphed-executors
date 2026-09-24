@@ -142,6 +142,7 @@ module = [
   "parsl_transport_harness",
   "m63_harness",
   "m65a_probe",
+  "m65a3_bodies",
 ]
 ignore_missing_imports = true
 

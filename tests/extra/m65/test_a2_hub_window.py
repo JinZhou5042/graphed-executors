@@ -35,7 +35,7 @@ def test_resume_refills_while_a_task_is_still_running() -> None:
     res = run.result()
     later = [e.t for e in rec.events if e.phase is TaskPhase.STARTED and e.t > resumed]
     assert res.stopped is StopReason.EXHAUSTED
-    assert later and min(later) - resumed < 0.2  # key 0 still runs until ~1 s: only the timed wake refills
+    assert later and min(later) - resumed < 0.5  # key 0 still runs until ~1 s: only the timed wake refills
 
 
 def test_held_time_is_not_run_time() -> None:

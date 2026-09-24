@@ -50,6 +50,10 @@ class DaskBackend:
     def n_workers(self) -> int:
         return len(self._client.scheduler_info()["workers"])
 
+    def task_slots(self) -> int:
+        """Tasks the cluster runs at once (each worker runs ``nthreads``); 0 with no worker yet."""
+        return sum(self._client.nthreads().values())
+
     def submit(
         self,
         fn: Any,
