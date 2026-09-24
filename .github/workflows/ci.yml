@@ -67,11 +67,73 @@ jobs:
           # rollout PR runs diff-cover informationally instead of failing on its own delta.
           if git cat-file -e origin/main:scripts/coverage_gate.py 2>/dev/null; then
             diff-cover coverage.xml --compare-branch=origin/main --fail-under=98 \
-              --exclude "*/dask_backend/*" "*/common/*" "*/parsl_backend/*"
+              --exclude "*/dask_backend/*" "*/common/*" "*/parsl_backend/*" \
+              "src/graphed_executors/taskvine_backend/*.py"
           else
             diff-cover coverage.xml --compare-branch=origin/main \
-              --exclude "*/dask_backend/*" "*/common/*" "*/parsl_backend/*"
+              --exclude "*/dask_backend/*" "*/common/*" "*/parsl_backend/*" \
+              "src/graphed_executors/taskvine_backend/*.py"
           fi
+
+  # Build the VineGraph development branch inside Conda. The regular matrix has no
+  # CCTools build, so its TaskVine tests importorskip; this job is the required gate.
+  test-taskvine:
+    name: test-taskvine (Conda + VineGraph)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get VineGraph source
+        run: |
+          git clone --filter=blob:none https://github.com/JinZhou5042/cctools.git cctools-src
+          git -C cctools-src checkout e9deeb451e54cec60fcc0c95fb77798aeef561ba
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: cctools-src/environment.yml
+          init-shell: bash
+          cache-downloads: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build VineGraph and install the executor
+        shell: bash -el {0}
+        run: |
+          micromamba install -y -n cctools-dev -c conda-forge python=3.13
+          cd cctools-src
+          ./configure --with-base-dir "$CONDA_PREFIX" --prefix "$CONDA_PREFIX"
+          make -j4
+          make install
+          cd ..
+          python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" "${{ env.HISTOGRAM }}"
+          python -m pip install -e ".[dev,taskvine]"
+          python -c "from ndcctools.taskvine.vine_graph import VineGraph, Workflow"
+          vine_worker --version
+      - name: Local TaskVine tests
+        shell: bash -el {0}
+        run: |
+          export PYTHONNOUSERSITE=1
+          pytest tests/extra/taskvine --cov-config=.coveragerc-taskvine --cov --cov-branch --cov-fail-under=0
+      - name: Real worker tests
+        shell: bash -el {0}
+        run: |
+          export PYTHONNOUSERSITE=1 GTV_WORKER=1
+          timeout 600s pytest tests/extra/taskvine/test_backend.py \
+            -k 'plan_matches_reference or worker_error_preserves_type' \
+            --cov-config=.coveragerc-taskvine --cov --cov-append --cov-branch --cov-fail-under=0
+      - name: TaskVine per-file coverage gate
+        shell: bash -el {0}
+        run: |
+          coverage report --rcfile=.coveragerc-taskvine --fail-under=90
+          coverage json --rcfile=.coveragerc-taskvine -o coverage.json
+          python scripts/coverage_gate.py coverage.json 90
+      - name: TaskVine diff coverage gate
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        shell: bash -el {0}
+        run: |
+          git fetch origin main
+          coverage xml --rcfile=.coveragerc-taskvine -o coverage.xml
+          diff-cover coverage.xml --compare-branch=origin/main --fail-under=98 \
+            --include "src/graphed_executors/taskvine_backend/*.py"
 
   # Free-threaded / bleeding-edge Pythons (plan A.5): genuinely exercises concurrency under no-GIL.
   # Experimental + non-blocking (awkward wheels may lag on 3.14 / 3.14t).
@@ -268,7 +330,7 @@ jobs:
   ci-required:
     name: ci required
     if: always()
-    needs: [test, test-dask, test-parsl, docs]
+    needs: [test, test-taskvine, test-dask, test-parsl, docs]
     runs-on: ubuntu-latest
     steps:
       - name: every needed job succeeded
