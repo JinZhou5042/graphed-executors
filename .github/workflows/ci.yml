@@ -92,13 +92,13 @@ jobs:
       - uses: mamba-org/setup-micromamba@v2
         with:
           environment-file: cctools-src/environment.yml
+          create-args: python=3.13
           init-shell: bash
           cache-downloads: true
       - uses: dtolnay/rust-toolchain@stable
       - name: Build VineGraph and install the executor
         shell: bash -el {0}
         run: |
-          micromamba install -y -n cctools-dev -c conda-forge python=3.13
           cd cctools-src
           ./configure --with-base-dir "$CONDA_PREFIX" --prefix "$CONDA_PREFIX"
           make -j4

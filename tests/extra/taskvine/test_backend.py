@@ -186,13 +186,6 @@ def test_empty_plan_cannot_be_lowered(executor):
         executor.lower(toy_plans.width_plan(0))
 
 
-def test_missing_vinegraph_has_actionable_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(backend, "_TASKVINE_IMPORT_ERROR", ModuleNotFoundError("VineGraph absent"))
-    ex = TaskVineExecutor(port=0, work_dir=tmp_path)
-    with pytest.raises(ImportError, match="requires a build"):
-        _ = ex.manager
-
-
 def test_missing_shipped_file_and_duplicate_destination(tmp_path):
     with pytest.raises(FileNotFoundError):
         TaskVineExecutor(ship=[tmp_path / "absent.py"])

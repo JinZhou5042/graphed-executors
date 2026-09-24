@@ -107,10 +107,8 @@ class Batches:
         self.tasks = [Task(i, Partition("f", "Events", 0, 10)) for i in range(n)]
         self.size = size
         self.cursor = 0
-        self.seen_durations = []
 
     def __call__(self, ctx):
-        self.seen_durations.append(len(ctx.last_durations))
         batch = self.tasks[self.cursor : self.cursor + self.size]
         self.cursor += self.size
         return batch or None
