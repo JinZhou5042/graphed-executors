@@ -29,7 +29,7 @@ from graphed.core.execution import ExecContext, ExecResult, StopReason
 
 from graphed_executors.local import plan_tree
 
-from . import _task_runtime, vinegraph_context
+from . import task_runtime, vinegraph_context
 
 try:
     from ndcctools.taskvine.vine_graph import VineGraph, Workflow
@@ -245,14 +245,14 @@ class TaskVineExecutor:
         workflow = Workflow()
         nodes = {
             i: workflow.add_task(
-                _task_runtime.run_leaf, blob, t.key, _portable(t.partition), collect_durations
+                task_runtime.run_leaf, blob, t.key, _portable(t.partition), collect_durations
             )
             for i, t in enumerate(tasks)
         }
         combines, root = plan_tree(len(tasks))
         for out, a, b in combines:
             nodes[out] = workflow.add_task(
-                _task_runtime.run_combine, blob, nodes[a].output(), nodes[b].output()
+                task_runtime.run_combine, blob, nodes[a].output(), nodes[b].output()
             )
         workflow.finalize()
         return workflow, nodes[root]

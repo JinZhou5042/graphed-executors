@@ -5,7 +5,7 @@ import sys
 
 import cloudpickle
 
-from . import _task_runtime
+from . import task_runtime
 
 
 def context_loader(graph_pkl):
@@ -20,7 +20,7 @@ def context_loader(graph_pkl):
     # all calls: unpickle each plan's (process, combine, empty) once and import graphed/awkward now,
     # instead of once per call.
     try:
-        _task_runtime.prime(graph)
+        task_runtime.prime(graph)
     except Exception as exc:  # priming is an optimization; calls still unpickle on demand
         print(f"graphed-taskvine: priming skipped: {exc!r}", file=sys.stderr)
     return {"graph": graph}
