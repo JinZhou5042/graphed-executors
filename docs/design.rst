@@ -385,6 +385,21 @@ to the driver in batches, so no task ever pays an inter-process round trip on it
 A driver-side collector thread replays them into your monitor. A per-worker sampling profiler,
 if you supply one through the monitor's ``worker_profiler_factory``, rides the same channel.
 
+Two capabilities a monitor may opt into change that path (graphed's ``lean_events`` and
+``worker_monitor_factory`` helpers read them once per run). A monitor with ``lean_events = True``
+gets no ``STARTED`` and a terminal event with an empty ``partition``, so no worker formats a label;
+the driver's ``SUBMITTED`` still carries it. A monitor whose ``worker_monitor_factory()`` returns a
+picklable factory has each worker process build its own monitor from it, once per process and
+factory, and send its task events and profile trees there instead of through the driver: the hub
+process pool passes the factory to its pool initializer and starts no collector (a persistent pool is
+respawned when anything its initializer fixes changes: the push or profiler factory, the lean flag,
+or whether it feeds the collector), each peer actor builds one per run, and
+``SubmitRunner`` workers (dask, parsl, or the ``ThreadBackend``'s threads) keep one per process and
+the driver skips the event topic. ``ThreadExecutor`` workers share the driver's process and keep
+calling the driver's monitor. ``NetworkMonitor(url, lean=True, per_worker=True)`` in
+``graphed.debug`` is the dashboard's monitor with both. With no monitor attached, workers build no
+event and format no label.
+
 The property that makes this safe to leave on is that emission is **best-effort and drops when
 full**. A slow monitor never becomes back-pressure that changes task timing — which would in
 turn change what the adaptive path decides — and a monitor that raises is swallowed. A run's

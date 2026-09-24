@@ -33,7 +33,9 @@ What does not work yet, and what to do instead.
 - **Dashboard events over parsl arrive at task completion, not live.** parsl has no
   worker-to-driver event stream, so a task's ``started``/``finished`` events are buffered on
   the worker and delivered together when its result comes back. Every event still arrives and
-  the result is unaffected — you just can't watch a task while it is in flight. Relatedly, on
+  the result is unaffected — you just can't watch a task while it is in flight, unless the
+  monitor offers a per-worker factory and the workers can reach the dashboard, in which case each
+  worker sends its events itself as they happen. Relatedly, on
   either backend the worker-to-worker exchange engine reports the combine count from the
   driver rather than emitting one event per combine.
 

@@ -14,8 +14,8 @@ concurrency:
 env:
   # the former core/debug/frontend/numpy/awkward siblings are now one consolidated package
   # Pinned, not @main: graphed is an unpinned upstream whose merges can redden this frozen suite with
-  # no local change. At graphed PR-A1's head (RunControl) until that merges; then its merge commit.
-  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@c551533f966bcdc35fe68727f13472d5b8d019b8"
+  # no local change. At graphed PR-B's head (per-worker push) until that merges; then its merge commit.
+  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@98216378e835f9adab5a1827bdc8be0c8ab25fe0"
   # corpus stays a separate package (test fixtures only, not shipped in the graphed wheel)
   CORPUS: "graphed-corpus @ git+https://github.com/graphed-org/graphed-corpus-mvp@main"
   # The frozen tree fills real histograms across the process boundary. Unlike CORPUS, omitting this
@@ -134,6 +134,7 @@ jobs:
             tests/frozen/m63/test_m63_submit_dask.py \
             tests/frozen/m65/test_m65a3_control_dask.py tests/frozen/m65/test_m65a3_control_submit.py \
             tests/frozen/m65/test_m65a3_control_stop.py \
+            tests/frozen/m65/test_m65b_push_submit.py tests/frozen/m65/test_m65b_push_dask.py \
             tests/extra/m43 tests/extra/m44 \
             --cov-config=.coveragerc-dask \
             --cov-branch --cov \

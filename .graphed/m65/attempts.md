@@ -151,3 +151,59 @@ leaves finished before it went out: fails on the old tree (join expires), passes
 `src/graphed_executors/local` for other `prebuffered` consumers: the settle-only actor is the only other
 one and already unpacks. The test's pause never reaches this route (`_run_peer` waits at entry before
 any actor exists), so the hang was an ordinary monitored proc-http run; nothing in A3 touches it.
+
+## B (plan-B.md, frozen `freeze-m65b` = `6c82849`; graphed `b5a2a71`)
+
+### Iteration 1 — B3 hub routes: lean events, lazy labels, per-worker push
+
+`_run_with_emit` drops STARTED and the label in lean mode; `_thread_task` and `_proc_task_shared` call
+`process` directly when there is nothing to emit (no monitor; no buffer and no push monitor).
+`_proc_init(profiler_factory, event_q, *, monitor_factory, lean)` stops and joins a live drain thread,
+assigns every worker global, builds the push monitor before registering `_proc_drain_final`, and
+`_proc_drain_final` sends the exit profile to that monitor. The driver reads `worker_monitor_factory`/
+`lean_events` once per run; the hub pool gets them through a `functools.partial` initializer and no
+event queue, the collector is skipped when pushing, and a kept (persistent) pool is respawned when the
+pickled push factory or the lean flag changes (test 12b). Hub frozen legs (tests 11 hub/pooled/adaptive,
+12 proc-hub, 12b hub, 14) pass; test 14 then m37 `test_inprocess_paths.py` pass in one process.
+
+### Iteration 2 — B4 peer actors and SubmitRunner
+
+`process_and_reduce` and the four actors take `monitor_factory`, `lean` and `keys`: a factory builds
+the actor's own monitor, which receives its task events and profile trees instead of `("events", …)`/
+`("profile", …)` to the driver; lean drops STARTED and the label; events carry `keys[leaf]`. `_run_peer`
+passes the sorted task keys only when a monitor is attached and they are not `0..n-1` (the pinned pool
+takes positional task arguments only). `SubmitRunner` builds one `RunContext` per run in `run()` with
+two appended defaulted fields (pickled factory, lean); workers push through `_WORKER_MONITORS` under
+`_WORKER_MONITORS_LOCK`; with push the driver neither subscribes nor waits, and the four drain sites wait
+for `ctx.events_per_leaf` events per leaf. B frozen executors files 31/31 plus the dask file pass.
+
+### Iteration 3 — B5 CI pin and docs
+
+`GRAPHED` pinned to graphed `lane/debug-b`'s head; the `test-dask` line gains the two B submit/dask
+files so that job's `submit/**` diff-cover sees the in-process worker-side `engine.py` lines. The
+design page's "Watching a run" states lean events and per-worker push; improvements notes live parsl
+events under push.
+
+### Iteration 4 — review r1 repair (L1; H1 lands in graphed)
+
+A kept hub pool is respawned when anything its initializer fixes changes — the push and profiler
+factories, the lean flag, and whether it feeds the collector (`_pool_init` is the one source for both
+the pool and the key); the old key named only push and lean, so a pool built for an unmonitored run
+kept `event_q=None` and a later monitored run saw no worker events. New
+`tests/extra/m65/test_b_kept_pool_init.py` fails on the old key (no FINISHED) and passes. `GRAPHED`
+re-pinned to graphed `lane/debug-b`'s head, which carries the H1 server fix. The cross-run
+misdelivery of a kept pool's trailing events into the next run's monitor is unchanged.
+
+### Iteration 5 — review r2 fold (N2)
+
+The `GRAPHED` pin comment names PR-B's head, and the pin moves to graphed `lane/debug-b`'s new head
+(one Perspective update per ingest frame).
+
+### Iteration 6 — thread-http trailing events
+
+The r2 fold's gate run failed `test_peer_events_carry_task_keys[thread-http-default]` (one FINISHED
+missing) under a loaded machine. Cause (pre-existing since the thread peer drain): a returned actor's
+HTTP lane can still be POSTing its last events when the driver joins the threads and polls once. The
+driver now closes the worker transports (draining their lanes, bounded by `CLOSE_DRAIN_S`) before that
+poll. New `tests/extra/m65/test_b_http_trailing_events.py` slows w1's event POSTs; it fails on the old
+drain and passes.

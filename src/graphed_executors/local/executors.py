@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import hashlib
 import multiprocessing
 import os
@@ -48,7 +49,9 @@ from graphed.core.execution import (
     TaskPhase,
     WorkerProfiler,
     emit_task,
+    lean_events,
     partition_label,
+    worker_monitor_factory,
 )
 from graphed.debug import StageError
 
@@ -117,6 +120,10 @@ _proc_resources: LocalResources | None = None
 # attached. Emission is best-effort and MUST NOT block a worker (drop-on-full).
 _proc_event_q: object | None = None
 _proc_profiler: WorkerProfiler | None = None
+# m65 B: with per-worker push this process's own monitor (built once by the initializer) receives
+# its task events and profile trees instead of the event queue; lean drops STARTED and the label.
+_proc_monitor: Monitor | None = None
+_proc_lean = False
 _MISSING = object()
 
 # M37 (telemetry OFF the data path): a worker emits events into a local in-process buffer (a deque
@@ -187,11 +194,25 @@ def _thread_resources() -> LocalResources:
 def _proc_init(
     profiler_factory: Callable[[], WorkerProfiler] | None = None,
     event_q: object | None = None,
+    *,
+    monitor_factory: Callable[[], Monitor] | None = None,
+    lean: bool = False,
 ) -> None:
     global _proc_resources, _proc_event_q, _proc_profiler, _proc_buffer
-    global _proc_drain_stop, _proc_drain_thread
+    global _proc_drain_stop, _proc_drain_thread, _proc_monitor, _proc_lean
+    if _proc_drain_stop is not None:  # a re-init must not leave the old drain thread shipping
+        _proc_drain_stop.set()
+    if _proc_drain_thread is not None:
+        _proc_drain_thread.join(timeout=2)
     _proc_resources = LocalResources()
     _proc_event_q = event_q
+    _proc_profiler = _proc_buffer = _proc_drain_stop = _proc_drain_thread = _proc_monitor = None
+    _proc_lean = lean
+    if monitor_factory is not None:
+        # built before _proc_drain_final registers, so LIFO atexit runs that hook (the final profile)
+        # while this monitor's own exit flush has not yet run
+        with contextlib.suppress(Exception):  # a monitor that won't build just disables telemetry
+            _proc_monitor = monitor_factory()
     if profiler_factory is not None:
         with contextlib.suppress(Exception):  # a profiler that won't start just disables sampling
             prof = profiler_factory()
@@ -205,6 +226,7 @@ def _proc_init(
             target=_proc_drain_loop, name="graphed-dash-worker-drain", daemon=True
         )
         _proc_drain_thread.start()
+    if event_q is not None or _proc_monitor is not None:
         atexit.register(_proc_drain_final)
 
 
@@ -248,7 +270,9 @@ def _proc_drain_final() -> None:
     if _proc_profiler is not None:
         with contextlib.suppress(Exception):
             payload = _proc_profiler.stop()
-            if payload and _proc_buffer is not None:
+            if payload and _proc_monitor is not None:
+                _proc_monitor.on_profile(str(os.getpid()), payload)
+            elif payload and _proc_buffer is not None:
                 _proc_buffer.append(("profile", (str(os.getpid()), payload)))
     _proc_drain_batch()
 
@@ -274,14 +298,17 @@ def _run_with_emit(
     emit_profile: Callable[[str, bytes], None],
     profiler: WorkerProfiler | None,
     profile_due: Callable[[], bool],
+    lean: bool = False,
 ) -> object:
-    """Run one task, emitting STARTED before and FINISHED/ERRORED after (worker-side timing).
-    ``emit_event`` is cheap (a local buffer append for processes, an in-process enqueue for threads);
-    the (expensive) profiler serialize runs only when ``profile_due()`` says so (time-throttled, off
-    the per-task path). SUBMITTED is emitted driver-side. Emission is best-effort."""
-    label = partition_label(task.partition)
+    """Run one task, emitting STARTED before and FINISHED/ERRORED after (worker-side timing), or in
+    ``lean`` mode only the terminal event, unlabelled. ``emit_event`` is cheap (a local buffer
+    append for processes, an in-process enqueue for threads); the (expensive) profiler serialize
+    runs only when ``profile_due()`` says so (time-throttled, off the per-task path). SUBMITTED is
+    emitted driver-side. Emission is best-effort."""
+    label = "" if lean else partition_label(task.partition)
     n = task.partition.n_entries
-    emit_event(TaskEvent(TaskPhase.STARTED, task.key, worker, time.perf_counter(), label, n))
+    if not lean:
+        emit_event(TaskEvent(TaskPhase.STARTED, task.key, worker, time.perf_counter(), label, n))
     try:
         result = process(task.partition, resources)
     except BaseException as exc:
@@ -339,8 +366,14 @@ def _thread_profile_due() -> bool:
 
 
 def _thread_task(
-    process: Callable[[Partition, LocalResources], object], task: Task, monitor: Monitor | None
+    process: Callable[[Partition, LocalResources], object],
+    task: Task,
+    monitor: Monitor | None,
+    lean: bool = False,
 ) -> object:
+    if monitor is None:
+        return process(task.partition, _thread_resources())
+
     def emit_event(ev: TaskEvent) -> None:
         emit_task(monitor, ev)  # in-process enqueue; the NetworkMonitor's sender thread does the I/O
 
@@ -358,6 +391,7 @@ def _thread_task(
         emit_profile=emit_profile,
         profiler=_thread_profiler(monitor),
         profile_due=_thread_profile_due,
+        lean=lean,
     )
 
 
@@ -378,13 +412,26 @@ def _prime_shared(token: str, payload: bytes) -> int:
 def _proc_task_shared(token: str, task: Task) -> object:
     assert _proc_resources is not None  # set by the pool initializer
     process = cast("Callable[[Partition, LocalResources], object]", _shared_objects[token])
+    monitor = _proc_monitor
+    if monitor is not None:  # per-worker push: straight to this process's own monitor
 
-    def emit_event(ev: TaskEvent) -> None:
-        _proc_emit(("task", ev))  # local buffer append; the drain thread ships it off-path
+        def emit_event(ev: TaskEvent) -> None:
+            emit_task(monitor, ev)
 
-    def emit_profile(worker: str, payload: bytes) -> None:
-        _proc_emit(("profile", (worker, payload)))
+        def emit_profile(worker: str, payload: bytes) -> None:
+            with contextlib.suppress(Exception):
+                monitor.on_profile(worker, payload)
 
+    elif _proc_buffer is not None:
+
+        def emit_event(ev: TaskEvent) -> None:
+            _proc_emit(("task", ev))  # local buffer append; the drain thread ships it off-path
+
+        def emit_profile(worker: str, payload: bytes) -> None:
+            _proc_emit(("profile", (worker, payload)))
+
+    else:  # no monitor: nothing to emit, so build no event and format no label
+        return process(task.partition, _proc_resources)
     return _run_with_emit(
         process,
         task,
@@ -394,6 +441,7 @@ def _proc_task_shared(token: str, task: Task) -> object:
         emit_profile=emit_profile,
         profiler=_proc_profiler,
         profile_due=_proc_profile_due,
+        lean=_proc_lean,
     )
 
 
@@ -479,6 +527,9 @@ class _BaseExecutor:
         self.control = control  # m65: pause/resume/cancel, read at each run (plan-A1 A-2)
         # the running plan's snapshot: a reassignment mid-run reaches the next plan, not this one
         self._run_monitor: Monitor | None = None
+        self._run_push: Callable[[], Monitor] | None = None  # the monitor's per-worker factory
+        self._run_lean = False
+        self._run_keys: list[int] | None = None  # a peer run's task keys, when not 0..n-1
         # M38: comms=None -> the hub reduction (driver combines); "ipc"/"http" -> PEER reduction
         # (combines run across the workers over that transport, off the driver). Result is identical
         # (same fixed plan_tree grouping); peer just relocates the combines. steal=True (peer only)
@@ -615,6 +666,8 @@ class _BaseExecutor:
         caller waits for the running plan to finish."""
         with self._run_lock:
             self._run_monitor = self.monitor
+            self._run_push = worker_monitor_factory(self.monitor)
+            self._run_lean = lean_events(self.monitor)
             control = self.control
             try:
                 if control is not None and control.state is RunState.CANCELLED:
@@ -649,6 +702,9 @@ class _BaseExecutor:
         worker_addrs = tuple(f"w{i}" for i in range(w))
         items = slice_items([t.partition for t in tasks], bounds, worker_addrs)
         self._emit_submitted(tasks)  # worker-side STARTED/FINISHED/ERRORED stream in
+        self._run_keys = None
+        if self._run_monitor is not None and any(t.key != i for i, t in enumerate(tasks)):
+            self._run_keys = [t.key for t in tasks]  # workers emit keys[leaf]
         # A thread actor starts its first leaf before the driver's first poll, so no tag could hold a
         # run entered paused: it waits here, before any actor exists.
         if control is not None and control.wait() is RunState.CANCELLED:
@@ -838,7 +894,8 @@ class ThreadExecutor(_BaseExecutor):
     def _raw_submit(
         self, pool: _PoolExecutor, process: Callable[[Partition, LocalResources], object]
     ) -> Callable[[Task], Future[object]]:
-        return lambda task: pool.submit(_thread_task, process, task, self._run_monitor)
+        monitor, lean = self._run_monitor, self._run_lean
+        return lambda task: pool.submit(_thread_task, process, task, monitor, lean)
 
     def _peer_execute(
         self,
@@ -871,6 +928,8 @@ class ThreadExecutor(_BaseExecutor):
                     steal=self._steal,
                     emit=self._run_monitor is not None,
                     profiler_factory=self._peer_profiler_factory(),
+                    lean=self._run_lean,
+                    keys=self._run_keys,
                 )
             except BaseException as exc:  # a thread exception is otherwise lost -> capture + propagate
                 errors[addr] = exc
@@ -907,6 +966,8 @@ class ThreadExecutor(_BaseExecutor):
             driver_t.broadcast(("done",))
             for t in threads:
                 t.join(timeout=30.0)
+            for a in worker_addrs:  # an HTTP lane still POSTs a returned actor's last events
+                transports[a].close()
             for _sender, payload in driver_t.poll():  # drain trailing monitor events the workers shipped
                 self._forward_peer_events(payload)
             if errors:
@@ -966,6 +1027,7 @@ class _ProcessExecutorBase(_BaseExecutor):
             max_in_flight=max_in_flight,
         )
         self._mgr: SyncManager | None = None
+        self._kept_init: tuple[bytes, bool] | None = None  # the kept hub pool's initializer identity
         self._event_q: object | None = None
         self._collector: threading.Thread | None = None
         self._collector_stop: threading.Event | None = None
@@ -1106,6 +1168,9 @@ class _ProcessExecutorBase(_BaseExecutor):
                         self._steal,
                         self._run_monitor is not None,
                         factory,
+                        self._run_push,  # the pinned pool takes no task keywords
+                        self._run_lean,
+                        self._run_keys,
                         worker=i,
                     )
                     for i, a in enumerate(worker_addrs)
@@ -1125,6 +1190,9 @@ class _ProcessExecutorBase(_BaseExecutor):
                         self._steal,
                         self._run_monitor is not None,
                         factory,
+                        monitor_factory=self._run_push,
+                        lean=self._run_lean,
+                        keys=self._run_keys,
                     )
                     for a in worker_addrs
                 ]
@@ -1181,6 +1249,9 @@ class _ProcessExecutorBase(_BaseExecutor):
                     self._steal,
                     self._run_monitor is not None,
                     factory,
+                    monitor_factory=self._run_push,
+                    lean=self._run_lean,
+                    keys=self._run_keys,
                 )
                 for a in worker_addrs
             ]
@@ -1266,13 +1337,19 @@ class _ProcessExecutorBase(_BaseExecutor):
         self._last_peer_witness = [f.result() for f in futs]  # propagate any error even on success
         return out
 
-    def _pool(self) -> _PoolExecutor:
+    def _pool_init(self) -> tuple[Any, Any, Any, bool]:
+        """What the worker initializer fixes: profiler factory, event queue, push factory, lean."""
         factory = self._run_monitor.worker_profiler_factory() if self._run_monitor is not None else None
+        push = self._run_push
+        return factory, None if push is not None else self._event_q, push, self._run_lean
+
+    def _pool(self) -> _PoolExecutor:
+        factory, event_q, push, lean = self._pool_init()
         return _StdProcessPool(
             max_workers=self.max_workers,
             mp_context=multiprocessing.get_context("spawn"),
-            initializer=_proc_init,
-            initargs=(factory, self._event_q),
+            initializer=functools.partial(_proc_init, monitor_factory=push, lean=lean),
+            initargs=(factory, event_q),
         )
 
     def _raw_submit(
@@ -1287,7 +1364,14 @@ class _ProcessExecutorBase(_BaseExecutor):
 
     @contextlib.contextmanager
     def _acquired_pool(self) -> Iterator[_PoolExecutor]:
+        # a kept pool whose initializer fixed other than what this run needs is respawned
         self._ensure_collector()
+        factory, event_q, push, lean = self._pool_init()
+        init = (pickle.dumps((factory, push, lean)), event_q is not None)
+        if init != self._kept_init and self._kept_pool is not None:
+            self._kept_pool.shutdown(wait=True)
+            self._kept_pool = None
+        self._kept_init = init
         try:
             with super()._acquired_pool() as pool:
                 yield pool
@@ -1300,7 +1384,7 @@ class _ProcessExecutorBase(_BaseExecutor):
                 self._stop_collector()
 
     def _ensure_collector(self) -> None:
-        if self._run_monitor is None:
+        if self._run_monitor is None or self._run_push is not None:  # pushing workers bypass it
             return
         if self._mgr is None:  # one manager + queue for this executor's lifetime
             self._mgr = multiprocessing.get_context("spawn").Manager()
