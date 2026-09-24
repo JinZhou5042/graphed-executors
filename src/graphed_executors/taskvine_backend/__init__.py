@@ -29,7 +29,7 @@ from graphed.core.execution import ExecContext, ExecResult, StopReason
 
 from graphed_executors.local import plan_tree
 
-from . import _task_runtime, _vinegraph_context
+from . import _task_runtime, vinegraph_context
 
 try:
     from ndcctools.taskvine.vine_graph import VineGraph, Workflow
@@ -44,7 +44,7 @@ else:
 
 __all__ = ["RunStats", "TaskVineExecutor", "TaskVineWorkerError"]
 
-cloudpickle.register_pickle_by_value(_vinegraph_context)
+cloudpickle.register_pickle_by_value(vinegraph_context)
 
 
 def _require_taskvine():
@@ -70,7 +70,7 @@ class _GraphedVineGraph(VineGraph):
         registration.add_hoisting_modules(hoisting_modules)
         registration.add_env_files(env_files)
         registration.set_context_loader(
-            _vinegraph_context.context_loader, context_loader_args=[cloudpickle.dumps(py_graph)]
+            vinegraph_context.context_loader, context_loader_args=[cloudpickle.dumps(py_graph)]
         )
         registration.set_cores(self.get_param("libcores"))
         registration.set_name(bridge.get_task_runner_library_name())
