@@ -204,6 +204,7 @@ Where to go next
    dask
    parsl
    htcondor
+   hgg
    api
    improvements
    changelog
@@ -212,6 +213,8 @@ Where to go next
   when a worker dies.
 * :doc:`dask`, :doc:`parsl` and :doc:`htcondor` — install, a worked run, the knobs, and the
   failures you will actually hit.
+* :doc:`hgg` — a real coffea analysis translated to graphed, and how its answers are checked
+  against the original's.
 * :doc:`api` — the reference, grouped by what you are doing.
 * :doc:`changelog` — what each release gives you that the last one did not.
 

@@ -14,8 +14,10 @@ concurrency:
 env:
   # the former core/debug/frontend/numpy/awkward siblings are now one consolidated package
   # Pinned, not @main: graphed is an unpinned upstream whose merges can redden this frozen suite with
-  # no local change. At graphed PR-C's head (the run report) until that merges; then its merge commit.
-  GRAPHED: "graphed[awkward,numpy]==0.0.6"
+  # no local change. At the multi-output-plans PR's head (m72: writes=, collate, parquet_write) until
+  # it merges, then its merge commit, then the first release carrying it. A git install builds the
+  # Rust core, so every job installing it needs a Rust toolchain.
+  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@49454d41e3b4fae05214ba67396b01fef9123f1a"
   # corpus stays a separate package (test fixtures only, not shipped in the graphed wheel)
   CORPUS: "graphed-corpus @ git+https://github.com/graphed-org/graphed-corpus-mvp@main"
   # The frozen tree fills real histograms across the process boundary. Unlike CORPUS, omitting this
@@ -23,6 +25,11 @@ env:
   # wheel instead of the main this suite is frozen against, and the job goes green on the wrong
   # package. Needed in every job that collects tests/frozen.
   HISTOGRAM: "graphed-histogram @ git+https://github.com/graphed-org/graphed-histogram@main"
+  # test-hgg only: the coffea fork with graphed mode, the uproot commit it needs (uproot.graphed is
+  # unreleased), and HiggsDNA, installed --no-deps because its declared deps pull torch/xgboost/onnx.
+  COFFEA: "coffea @ git+https://github.com/graphed-org/coffea-graphed-mvp@b2612ab03932ba61f183eb5f582870109020446b"
+  UPROOT: "uproot @ git+https://github.com/scikit-hep/uproot5@ca3a8a28c0846ea4c6f42452f69e3cce2939bf62"
+  HIGGS_DNA: "higgs-dna @ git+https://gitlab.cern.ch/cms-analysis/general/HiggsDNA.git@d17930519cafd8eec06e74e4e9fb7add3cf62b5a"
 
 jobs:
   test:
@@ -312,6 +319,31 @@ jobs:
           diff-cover coverage.xml --compare-branch=origin/main --fail-under=98 \
             --include "src/graphed_executors/htcondor_backend/**/*.py"
 
+  # m69a: examples/hgg against the original H->gg script as oracle. The main matrix has no coffea, so
+  # tests/frozen/m69a skips there; here GRAPHED_HGG_REQUIRED=1 turns a missing dependency into a failure.
+  # The example is outside the coverage gate.
+  test-hgg:
+    name: test-hgg py3.12
+    runs-on: ubuntu-latest
+    env:
+      GRAPHED_HGG_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install deps + this package + the coffea fork and higgs_dna
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" "${{ env.HISTOGRAM }}" \
+            "${{ env.COFFEA }}" "${{ env.UPROOT }}" vector correctionlib pyarrow
+          python -m pip install -e ".[dev]"
+          python -m pip install --no-deps "${{ env.HIGGS_DNA }}"
+      - name: Pytest m69a
+        run: pytest tests/frozen/m69a
+
   docs:
     name: docs (sphinx -W)
     runs-on: ubuntu-latest
@@ -334,7 +366,7 @@ jobs:
   ci-required:
     name: ci required
     if: always()
-    needs: [test, test-dask, test-parsl, test-htcondor, docs]
+    needs: [test, test-dask, test-parsl, test-htcondor, test-hgg, docs]
     runs-on: ubuntu-latest
     steps:
       - name: every needed job succeeded

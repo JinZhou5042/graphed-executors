@@ -86,8 +86,10 @@ show_missing = true
 
 [tool.ruff]
 line-length = 110
-src = ["src", "tests"]
+src = ["src", "tests", "examples/hgg"]
 target-version = "py311"
+# the owner's original H->gg processor, kept byte-identical as the m69a oracle
+extend-exclude = ["tests/frozen/m69a/data/inclusive_processor.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF", "PLC0415"]
@@ -126,14 +128,16 @@ exclude = ["tests/frozen/**", "*.md"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "examples"]
+# the owner's original H->gg processor, kept byte-identical as the m69a oracle
+exclude = ['^tests/frozen/m69a/data/inclusive_processor\.py$']
 # The test tree has no __init__.py, so without explicit_package_bases every test file would be a
 # bare basename and `module = ["tests.frozen.*"]` below could not match it. The repo root as a
 # package base gives them dotted names instead (tests.frozen.m40.foo). The two tests/extra dirs with
 # sibling helper modules are bases as well, so `import _big_partial` resolves the way pytest's
 # prepend import mode resolves it; the frozen dirs must NOT be, since a base there would put their
 # files back on bare basenames and un-match the override.
-mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54"]
+mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54", "examples/hgg"]
 explicit_package_bases = true
 
 # Read-only helpers under tests/frozen/{m44,m47,m63,m65} that tests import by bare basename: pytest
@@ -161,6 +165,12 @@ module = [
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# examples/hgg: coffea, higgs_dna, pyarrow and fsspec ship no type information, and only the test-hgg
+# job installs coffea/higgs_dna/correctionlib; hgg_harness is the frozen m69a harness validate_real.py imports.
+[[tool.mypy.overrides]]
+module = ["coffea.*", "higgs_dna.*", "correctionlib.*", "pyarrow.*", "fsspec", "hgg_harness"]
+ignore_missing_imports = true
 
 # dask/distributed ship no type information; the dask backend is optional and only imported lazily.
 [[tool.mypy.overrides]]

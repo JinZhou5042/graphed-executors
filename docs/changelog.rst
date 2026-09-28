@@ -20,6 +20,16 @@ Run on an HTCondor pool
   ``SiteProfile`` gains ``worker_ports``, ``service_ports`` and ``jobs_can_submit``. See
   :doc:`htcondor`.
 
+An H→γγ analysis on graphed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``examples/hgg``: a HiggsDNA-derived H→γγ inclusive processor translated to graphed, on coffea
+  NanoEvents in graphed mode. One plan over a fileset of MC and data writes the original's parquet
+  part for every chunk and returns each dataset's counters as coffea's Runner accumulates them,
+  and a new CI job checks it against the original script (:doc:`hgg`). It needs graphed's
+  multi-output plans (``aggregate_plan(writes=)``, ``collate``, ``parquet_write``), which CI
+  installs from git until a graphed release carries them.
+
 0.0.4
 -----
 
