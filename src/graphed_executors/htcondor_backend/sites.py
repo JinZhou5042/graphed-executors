@@ -2,15 +2,19 @@
 
 A :class:`SiteProfile` holds the submit keys a site needs (templates over ``{image}``, ``{uid}``,
 ``{user}`` and ``{home}``), whether its schedd needs spooled sandboxes, whether pilots get the driver's
-venv shipped as ``env.tgz``, the directory tree its schedd can read, how to find a schedd, and the
-driver-side ports its execute nodes can reach.
+venv shipped as ``env.tgz``, the directory tree its schedd can read, how to find a schedd, the
+driver-side ports its execute nodes can reach, and the services the site hosts (kind -> endpoint), the
+second leg of a run's service set.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
+from types import MappingProxyType
 from typing import Any
+
+from graphed.services import split_endpoint
 
 # The attributes schedd_weight reads, projected in the collector query.
 WEIGHT_ATTRS = ("Name", "RecentDaemonCoreDutyCycle", "ShadowsRunning", "MaxJobsRunning", "TotalIdleJobs")
@@ -25,7 +29,9 @@ class SiteProfile:
     reads, so ``log_dir`` must lie under it. ``driver_ports`` is the inclusive range the task server
     binds on the submit host. ``service_ports`` is the range of login-node ports execute nodes reach for
     a service beside the driver, ``worker_ports`` the range one execute node reaches on another; ``None``
-    means no such port was measured open. ``jobs_can_submit`` is whether a job there may submit jobs."""
+    means no such port was measured open. ``jobs_can_submit`` is whether a job there may submit jobs.
+    ``services`` maps a service ``kind`` to the endpoint (``scheme://host:port``) the site hosts it
+    at; a value that is not one fails construction naming the row."""
 
     name: str
     submit: Mapping[str, str]
@@ -37,6 +43,21 @@ class SiteProfile:
     service_ports: tuple[int, int] | None = None
     worker_ports: tuple[int, int] | None = None
     jobs_can_submit: bool = True
+    services: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        for kind, endpoint in self.services.items():
+            try:
+                split_endpoint(endpoint)
+            except ValueError as exc:
+                raise ValueError(f"site {self.name!r}: services[{kind!r}]: {exc}") from None
+        object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # a mappingproxy neither pickles nor deep-copies; the constructor re-wraps the plain dict (as
+        # graphed's Launch does)
+        values = [getattr(self, f.name) for f in fields(self)]
+        return (type(self), tuple(dict(v) if isinstance(v, MappingProxyType) else v for v in values))
 
     @property
     def service_hosts(self) -> tuple[str, ...]:
@@ -66,6 +87,8 @@ SITES: Mapping[str, SiteProfile] = {
         service_ports=(10001, 10100),
         worker_ports=(10000, 10100),
         jobs_can_submit=False,
+        # the EAF Triton, reached over gRPC+TLS from a batch worker (P8)
+        services={"triton": "grpcs://triton.fnal.gov:443"},
     ),
     "lxplus": SiteProfile(
         name="lxplus",

@@ -30,18 +30,19 @@ from graphed_executors.htcondor_backend import (
 )
 from graphed_executors.htcondor_backend.driverless import DRIVER_MODULE
 from graphed_executors.htcondor_backend.sites import SITES
+from graphed_executors.submit import services
 
 
 def test_the_driver_host_falls_back_to_this_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "getfqdn", lambda: "fallback.example")
     monkeypatch.delenv("_CONDOR_MACHINE_AD", raising=False)
-    assert driver.machine_host() == "fallback.example"
+    assert services.host_identity() == "fallback.example"
     ad = tmp_path / ".machine.ad"
     ad.write_text('Name = "slot1@x"\n')
     monkeypatch.setenv("_CONDOR_MACHINE_AD", str(ad))
-    assert driver.machine_host() == "fallback.example"
+    assert services.host_identity() == "fallback.example"
     ad.write_text('Name = "slot1@x"\nMachine = "node7.example"\n')
-    assert driver.machine_host() == "node7.example"
+    assert services.host_identity() == "node7.example"
 
 
 class Unpicklable(Exception):
@@ -52,7 +53,7 @@ class Unpicklable(Exception):
 def test_an_unpicklable_outcome_comes_back_as_text() -> None:
     ok, err = pickle.loads(driver._result_blob(False, Unpicklable("lost handle")))
     assert ok is False and type(err) is RuntimeError
-    assert "Unpicklable did not pickle (no pickling): lost handle" in str(err)
+    assert "Unpicklable did not round-trip through pickle (TypeError: no pickling): lost handle" in str(err)
 
 
 def test_the_default_schedd_is_named_by_its_own_ad() -> None:
@@ -163,7 +164,14 @@ def test_pilots_lost_after_the_driver_waits_exit_1(tmp_path: Path, monkeypatch: 
     assert ok is False and getattr(err, "cause_type", None) == "KilledWorker", err
 
 
+def _unused_leaf(partition: Partition, resources: object) -> int:
+    return 0
+
+
 class ClosingRunner:
+    backend = None  # the plan declares no services, so the driver's service set never reaches it
+    services = None
+
     def __init__(self, outcome: object) -> None:
         self.outcome = outcome
 
@@ -187,7 +195,7 @@ def test_a_failing_close_keeps_the_run_outcome(
     outcome: object, code: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "run.json").write_text(json.dumps({"min_pilots": 1}))
-    (tmp_path / "plan.pkl").write_bytes(pickle.dumps(None))
+    (tmp_path / "plan.pkl").write_bytes(pickle.dumps(Plan(process=_unused_leaf, combine=max, empty=int)))
     monkeypatch.setattr(driver, "_runner", lambda run, job, log: ClosingRunner(outcome))
     assert driver.main([str(tmp_path)]) == code
     ok, payload = pickle.loads((tmp_path / "result.pkl").read_bytes())
@@ -223,7 +231,7 @@ def test_the_driver_log_names_the_pilot_cluster(tmp_path: Path, monkeypatch: pyt
         DaemonType=SimpleNamespace(Schedd="schedd"),
     )
     monkeypatch.setattr(launch, "_htcondor", lambda: fake)
-    monkeypatch.setattr(driver, "machine_host", lambda: "127.0.0.1")
+    monkeypatch.setattr(driver, "host_identity", lambda: "127.0.0.1")
     run = {
         "pilots": "condor",
         "site": "generic",

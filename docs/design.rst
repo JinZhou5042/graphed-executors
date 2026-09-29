@@ -869,6 +869,21 @@ plan error (3) is deterministic and ends HTCondor's retries; anything else (1), 
 included, is retried. A ``RunHandle`` is five fields of JSON, so another session can pick the run
 up.
 
+**Services: an analysis names them, a run finds them.** A plan's ``services`` are requirements
+(graphed ``ServiceSpec``: a name, a kind, a readiness check, optionally a launch recipe); the endpoint
+a run reaches one at is environment, never graph identity. ``SubmitRunner`` resolves each for every
+run, on any backend, by three legs in order — an endpoint the user gave, the site's endpoint for the
+kind, a managed start — and names every leg and why it did not apply when none does. It checks each
+endpoint where it runs and then from a worker, through an ordinary task, because a service the driver
+reaches may be firewalled from the execute nodes; a managed one must answer a worker on another host
+than its own unless that host is the driver's. The endpoints are bound into the plan before its first
+task and the value is resolved while the services are still up. A run's services, its probe tasks and
+its queued tasks live exactly as long as the run: every acquisition registers its release when it
+returns, and each release logs its failure instead of raising, so the error you see is the first one.
+The engine names no service; the recipes are plain data in ``graphed_executors.submit.recipes``.
+Cluster hosting is one duck-typed seam, a backend's ``host_service``/``release_service`` pair, that a
+later release fills.
+
 Not supported yet
 -----------------
 

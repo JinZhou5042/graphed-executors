@@ -194,6 +194,9 @@ Two things bite people on HTEX:
 - `submit(plan)`, on every runner here, returns a `concurrent.futures.Future` straight away, so
   you can record and compile the next plan while this one runs; `.result()` is what `run(plan)`
   would have returned. Plans still run one at a time, in the order you submitted them.
+- A plan that calls a server (an inference server, say) declares it, and the cluster runners find
+  it for each run: `services={"triton": "grpc://host:8001"}`, the site's, or one they start from
+  the declared recipe and stop afterwards. See [Services](docs/htcondor.rst#services).
 - Every runner accepts `monitor=` — an observer that receives one event per task submitted,
   started, and finished, without changing the run — and a `graphed.core.RunControl` that pauses,
   resumes or cancels it. A cancelled run returns the merge of the tasks that finished.

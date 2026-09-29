@@ -139,13 +139,17 @@ def dask_runner(
     retries: int = 3,
     replicate_broadcast: bool = False,
     max_in_flight: int = 2,
+    services: Mapping[str, str] | None = None,
 ) -> SubmitRunner:
     """The user-facing one-liner: register the per-worker plugin on ``client`` and return a
     :class:`SubmitRunner` over a :class:`DaskBackend`. ``close()`` does NOT close the caller's client.
     ``retries`` is forwarded to dask (per-task); a Plan's per-task ``resources`` hints, if any, are
-    advisory only — this adapter does not enforce them yet (see :meth:`DaskBackend.submit`)."""
+    advisory only — this adapter does not enforce them yet (see :meth:`DaskBackend.submit`).
+    ``services`` are the runner's given service endpoints (``SubmitRunner(services=)``)."""
     from .plugin import GraphedWorkerPlugin  # noqa: PLC0415  (lazy: distributed is the optional extra)
 
     client.register_plugin(GraphedWorkerPlugin())
     backend = DaskBackend(client, replicate_broadcast=replicate_broadcast)
-    return SubmitRunner(backend, monitor=monitor, retries=retries, max_in_flight=max_in_flight)
+    return SubmitRunner(
+        backend, monitor=monitor, retries=retries, max_in_flight=max_in_flight, services=services
+    )

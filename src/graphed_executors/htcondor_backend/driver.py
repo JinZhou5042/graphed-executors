@@ -4,45 +4,60 @@
 ``run.json``. The driver runs the plan with :class:`HTCondorRunner` over :class:`LocalPilots` in its own
 slot (``pilots="local"``) or over pilot jobs it submits itself (``pilots="condor"``, to the schedd named
 by ``run.json["schedd_locate"]``), and on every exit writes ``result.pkl`` = ``(ok, ExecResult |
-exception)`` and ``driver.log`` for the output transfer. Exit codes: 0 done; 3 the plan raised (a plan
-error is deterministic, so the job's ``retry_until`` stops retrying it); 1 anything else, including a run
-that failed because its workers were lost, which the job's retries may get past.
+exception)`` and ``driver.log`` for the output transfer.
+
+The plan's services are resolved here, in the driver job, by the engine's three legs: the
+``run.json["endpoints"]`` the submitter gave (leg 1), the job's own site row (leg 2), or a managed
+start beside the driver (leg 3); the run then re-checks and probes them as leg-1 endpoints inside
+``runner.run`` and resolves its value while they are still up.
+
+``main`` classifies an exit by phase, and only inside ``runner.run(plan)`` by type:
+
+- 0: done.
+- 1: environment, which the job's retries may get past. Anything raised before or after
+  ``runner.run(plan)``: reading ``run.json`` or the plan, starting the pilots, and the driver's own
+  service set (its endpoints and placement are environment; *this plan's decision*, plan-services D6).
+  Inside ``runner.run``: a run whose workers were lost (a ``KilledWorker`` ``StageError``, e.g. every
+  pilot preempted; *owner ruling 2026-09-25*), and the run's own service phase (``ServiceUnavailable``,
+  ``ServiceUnreachable`` and a probe's raw ``WorkerLost``; *this plan's decision*).
+- 3: every other exception from ``runner.run(plan)``: the plan's own error, deterministic, so the job's
+  ``retry_until`` stops retrying it. A ``StageError`` (*owner ruling 2026-09-25*) or a task's exception
+  re-raised intact, such as a ``ValueError`` (*this plan's decision*).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pickle
-import socket
 import sys
 import time
 import traceback
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, TextIO
 
 from graphed.debug import StageError
 
+from graphed_executors.submit.services import (
+    ServiceSet,
+    ServiceUnavailable,
+    ServiceUnreachable,
+    host_identity,
+    release_quietly,
+)
+
 from .backend import HTCondorBackend, HTCondorRunner
 from .launch import LOG_FILE, PLAN_FILE, RESULT_FILE, RUN_FILE, CondorPilots, LocalPilots
+from .server import WorkerLost
 from .sites import SITES
 
 EXIT_DONE, EXIT_FAILED, EXIT_PLAN_ERROR = 0, 1, 3
 
 
-def machine_host() -> str:
-    """``Machine`` from the ad file ``$_CONDOR_MACHINE_AD`` names: a container's own hostname is not the
-    execute node's, and no bindings are needed to read it. This host's FQDN outside a job."""
-    path = os.environ.get("_CONDOR_MACHINE_AD")
-    if path and os.path.isfile(path):
-        for line in Path(path).read_text().splitlines():
-            name, _, value = line.partition("=")
-            if name.strip() == "Machine":
-                return value.strip().strip('"')
-    return socket.getfqdn()
-
-
 def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
+    """The job's runner over its pilots; the backend is released if anything after it fails."""
     profile = SITES[run["site"]]
     n = int(run["n_pilots"])
     if run["pilots"] == "condor":
@@ -54,38 +69,48 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
             user_modules=[job / name for name in run["user_modules"]],
             schedd_locate=tuple(run["schedd_locate"]),
         )
-        host, ports = machine_host(), profile.worker_ports
+        host, ports = host_identity(), profile.worker_ports
     else:
         # the slot's own pilots dial loopback; any free port serves them
         launcher = LocalPilots(python=sys.executable, pythonpath=[job])
         host, ports = "127.0.0.1", profile.worker_ports or (0, 0)
-    backend = HTCondorBackend(launcher, n, host=host, port_range=ports)
-    if run["pilots"] == "condor":
-        where = f"cluster={launcher.cluster}"
-    else:
-        where = f"pids={[p.pid for p in launcher._procs]}"
-    print(f"{n} {run['pilots']} pilots on {backend._server.url} {where}", file=log, flush=True)
-    return HTCondorRunner(
-        backend,
-        min_pilots=int(run["min_pilots"]),
-        retries=int(run["retries"]),
-        max_in_flight=int(run["max_in_flight"]),
-    )
+    with ExitStack() as on_error:  # held until the runner exists: a failure after the pilots stops them
+        backend = HTCondorBackend(launcher, n, host=host, port_range=ports, in_job=profile)
+        on_error.callback(release_quietly, "the driver job's backend", backend.close)
+        if run["pilots"] == "condor":
+            where = f"cluster={launcher.cluster}"
+        else:
+            where = f"pids={[p.pid for p in launcher._procs]}"
+        print(f"{n} {run['pilots']} pilots on {backend._server.url} {where}", file=log, flush=True)
+        runner = HTCondorRunner(
+            backend,
+            min_pilots=int(run["min_pilots"]),
+            retries=int(run["retries"]),
+            max_in_flight=int(run["max_in_flight"]),
+        )
+        on_error.pop_all()
+    return runner
 
 
 def _result_blob(ok: bool, payload: object) -> bytes:
+    """``pickle.dumps((ok, payload))``, returned only once it loads again: an outcome that does not
+    round-trip (unpicklable, or an exception whose constructor differs from its ``args``) reaches the
+    submitter as a ``RuntimeError`` carrying its text."""
     try:
-        return pickle.dumps((ok, payload))
-    except Exception as exc:  # an unpicklable result or exception still reaches the submitter, as text
-        return pickle.dumps(
-            (False, RuntimeError(f"{type(payload).__name__} did not pickle ({exc}): {payload}"))
-        )
+        blob = pickle.dumps((ok, payload))
+        pickle.loads(blob)
+        return blob
+    except Exception as exc:
+        text = f"{type(payload).__name__} did not round-trip through pickle ({type(exc).__name__}: {exc})"
+        return pickle.dumps((False, RuntimeError(f"{text}: {payload}")))
 
 
 def _exit_code(exc: Exception) -> int:
-    """A plan error exits 3 and is not retried; a run whose workers were lost (preempted) exits 1."""
+    """The exit of an exception from inside ``runner.run(plan)``: 1 (retried) for lost workers and for
+    the run's service phase, 3 (not retried) for everything else, the plan's own error."""
     lost = isinstance(exc, StageError) and exc.cause_type == "KilledWorker"
-    return EXIT_FAILED if lost else EXIT_PLAN_ERROR
+    service = isinstance(exc, ServiceUnavailable | ServiceUnreachable | WorkerLost)
+    return EXIT_FAILED if lost or service else EXIT_PLAN_ERROR
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,6 +124,12 @@ def main(argv: list[str] | None = None) -> int:
     code = EXIT_FAILED
     with open(job / LOG_FILE, "a") as log:
         print(f"driver pid={os.getpid()} dir={job}", file=log, flush=True)
+        handler = logging.StreamHandler(log)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+        package = logging.getLogger("graphed_executors")
+        level = package.level
+        package.addHandler(handler)  # service statuses and failed releases, in driver.log
+        package.setLevel(logging.INFO)
         try:
             run = json.loads((job / RUN_FILE).read_text())
             with open(job / PLAN_FILE, "rb") as f:
@@ -107,10 +138,14 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 live = runner.wait_for_pilots()
                 print(f"{live} pilots live after {time.monotonic() - start:.1f}s", file=log, flush=True)
-                try:
-                    result, code = runner.run(plan), EXIT_DONE
-                except Exception as exc:
-                    error, code = exc, _exit_code(exc)
+                # the driver job's own set: its failures are environment (exit 1) whatever their type
+                given = run.get("endpoints") or {}
+                with ServiceSet(plan.services, runner.backend, endpoints=given) as endpoints:
+                    runner.services = endpoints
+                    try:
+                        result, code = runner.run(plan), EXIT_DONE
+                    except Exception as exc:
+                        error, code = exc, _exit_code(exc)
             finally:
                 try:
                     runner.close()
@@ -119,6 +154,10 @@ def main(argv: list[str] | None = None) -> int:
                     traceback.print_exc(file=log)
         except Exception as exc:
             error, code = exc, EXIT_FAILED
+        finally:
+            package.removeHandler(handler)
+            handler.close()
+            package.setLevel(level)
         blob = _result_blob(True, result) if error is None else _result_blob(False, error)
         if error is not None:
             traceback.print_exception(error, file=log)

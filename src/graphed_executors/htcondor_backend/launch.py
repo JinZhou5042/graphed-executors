@@ -4,6 +4,11 @@
 A pilot is ``python -m graphed_executors.htcondor_backend.pilot <url> <secret file>``. The secret travels
 as a transferred file, never in ``arguments`` or ``environment``: both are readable by anyone who can
 query the job ad. ``htcondor2`` is imported only by :func:`_htcondor`, at ``CondorPilots.start``.
+
+Each launcher registers the release of what it acquires the moment the acquisition returns (a pilot
+process once spawned, a cluster once ``schedd.submit`` returns, before its sandbox spools), so a start
+that fails part-way leaves nothing behind, and ``stop`` is the close of what a start kept. Each release
+logs its failure and never raises, so one failing release never skips the next.
 """
 
 from __future__ import annotations
@@ -21,9 +26,11 @@ import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+from graphed_executors.submit.services import release_quietly
 
 from .server import POLL_S
 from .sites import SITES, WEIGHT_ATTRS, SiteProfile, choose_schedd, counts_as_alive
@@ -74,6 +81,8 @@ class LocalPilots:
         self.pythonpath = [str(p) for p in pythonpath]
         self.log_dir = Path(tempfile.mkdtemp(prefix="graphed-local-pilots-"))
         self._procs: list[subprocess.Popen[bytes]] = []
+        self._stack = ExitStack()
+        self._stop_by = 0.0  # until then a stopping pilot may exit on its own; a failed start: at once
 
     def start(self, url: str, secret: bytes, n: int) -> None:
         secret_path = self.log_dir / SECRET_FILE
@@ -81,18 +90,26 @@ class LocalPilots:
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join([*self.pythonpath, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
         cmd = [self.python, "-m", PILOT_MODULE, url, str(secret_path)]
-        self._procs = [subprocess.Popen(cmd, env=env) for _ in range(n)]
+        self._procs = []
+        with ExitStack() as stack:
+            for _ in range(n):
+                proc = subprocess.Popen(cmd, env=env)
+                stack.callback(release_quietly, f"pilot pid {proc.pid}", self._stop_pilot, proc)
+                self._procs.append(proc)
+            self._stack = stack.pop_all()
+
+    def _stop_pilot(self, proc: subprocess.Popen[bytes]) -> None:
+        with suppress(subprocess.TimeoutExpired):
+            proc.wait(max(0.0, self._stop_by - time.monotonic()))
+        proc.terminate()  # a no-op once it exited
+        proc.wait()
 
     def alive(self) -> int:
         return sum(p.poll() is None for p in self._procs)
 
     def stop(self) -> None:
-        deadline = time.monotonic() + CLOSE_WAIT_S
-        for proc in self._procs:
-            with suppress(subprocess.TimeoutExpired):
-                proc.wait(max(0.0, deadline - time.monotonic()))
-            proc.terminate()  # a no-op once it exited
-            proc.wait()
+        self._stop_by = time.monotonic() + CLOSE_WAIT_S
+        self._stack.close()
         shutil.rmtree(self.log_dir, ignore_errors=True)
 
 
@@ -134,6 +151,7 @@ class CondorPilots:
         self._constraint = ""
         self._secret = Path(SECRET_FILE)
         self._batch = f"graphed-pilots-{uuid.uuid4().hex[:8]}"
+        self._stack = ExitStack()
 
     def _template_vars(self) -> dict[str, str]:
         return {
@@ -205,10 +223,12 @@ class CondorPilots:
         desc = self.submit_description(url, n, {"executable": str(script)})
         htc = _htcondor()
         name, schedd = self._choose(htc)
-        result = self._submit(htc, schedd, desc, n)
-        self.cluster = (name, int(result.cluster()))
-        self._constraint = f"ClusterId == {self.cluster[1]}"
-        self._schedd = schedd
+        with ExitStack() as stack:
+            result = self._submit(htc, schedd, desc, n, stack)
+            self.cluster = (name, int(result.cluster()))
+            self._constraint = f"ClusterId == {self.cluster[1]}"
+            self._schedd = schedd
+            self._stack = stack.pop_all()
 
     def _stage(self, log_dir: Path, script_name: str, module: str) -> Path:
         """Write the job script running ``python -m <module> "$@"`` and, when the site ships it, ``env.tgz``."""
@@ -223,12 +243,24 @@ class CondorPilots:
                 tar.add(self.env, arcname="env")
         return script
 
-    def _submit(self, htc: Any, schedd: Any, desc: Mapping[str, str], n: int) -> Any:
-        """Submit ``n`` jobs of ``desc``, spooling their sandbox where the site needs it."""
+    def _submit(self, htc: Any, schedd: Any, desc: Mapping[str, str], n: int, stack: ExitStack) -> Any:
+        """Submit ``n`` jobs of ``desc``, spooling their sandbox where the site needs it. The cluster's
+        removal goes on ``stack`` as soon as ``schedd.submit`` returns, so a failed spool leaves none."""
         result = schedd.submit(htc.Submit(dict(desc)), count=n, spool=self.profile.spool)
+        constraint = f"ClusterId == {int(result.cluster())}"
+        stack.callback(release_quietly, f"cluster {constraint}", self._remove, htc, schedd, constraint)
         if self.profile.spool:
             schedd.spool(result)
         return result
+
+    def _remove(self, htc: Any, schedd: Any, constraint: str) -> None:
+        """Fetch a spooled cluster's finished logs into ``log_dir`` and remove what is still queued."""
+        left = schedd.query(constraint=constraint, projection=["JobStatus"])
+        if left:
+            if self.profile.spool and any(ad.get("JobStatus") == 4 for ad in left):
+                schedd.retrieve(f"{constraint} && JobStatus == 4")
+            # a spooled job stays in the queue after it completes until it is removed
+            schedd.act(htc.JobAction.Remove, constraint, reason="graphed: run closed")
 
     def _choose(self, htc: Any) -> tuple[str, Any]:
         """The site's schedd: lowest :func:`schedd_weight` among the query's ads, asking each collector
@@ -260,19 +292,17 @@ class CondorPilots:
         ads = self._schedd.query(constraint=self._constraint, projection=["JobStatus", "HoldReasonCode"])
         return sum(counts_as_alive(ad) for ad in ads)
 
-    def stop(self) -> None:
-        """Wait for the pilots to exit, fetch the spooled logs into ``log_dir``, and remove the jobs."""
+    def _drain(self) -> None:
         deadline = time.monotonic() + CLOSE_WAIT_S
         while self.alive() and time.monotonic() < deadline:
             time.sleep(1.0)
-        htc = _htcondor()
-        constraint = self._constraint
-        left = self._schedd.query(constraint=constraint, projection=["JobStatus"])
-        if left:
-            if self.profile.spool and any(ad.get("JobStatus") == 4 for ad in left):
-                self._schedd.retrieve(f"{constraint} && JobStatus == 4")
-            # a spooled job stays in the queue after it completes until it is removed
-            self._schedd.act(htc.JobAction.Remove, constraint, reason="graphed: run closed")
+
+    def stop(self) -> None:
+        """Wait for the pilots to exit, fetch the spooled logs into ``log_dir``, and remove the jobs."""
+        release_quietly(
+            f"the wait for the pilots of {self.cluster} to exit", self._drain
+        )  # removal still runs
+        self._stack.close()
         self._secret.unlink(missing_ok=True)
 
 

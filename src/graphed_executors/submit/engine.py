@@ -11,6 +11,13 @@ The worker seam (plan §1.1, review r1 B1): per-run state travels as a picklable
 first argument; per-worker capability (``open_once`` resources + the event transport) arrives via a
 :class:`WorkerEnv` a BACKEND installs through its own module-level shim — never via an import here,
 so ``submit/`` names dask nowhere and ``test_submit_no_dask_import`` holds.
+
+A submission's scope is its run (plan-services §3.1): ``run`` opens one ``ExitStack`` and registers on
+it everything the submission acquires — the plan's :class:`ServiceSet` (``submit/services.py``) when
+``plan.services`` is non-empty, then a ``cancel`` of its plan tasks not yet done — so no service,
+record or queued task of a run outlives it or reaches another. The body runs on the plan with the
+run's endpoints bound (graphed's ``bind_services``, before the first plan-task submit), and the value
+is resolved against the plan while its services are still up.
 """
 
 from __future__ import annotations
@@ -24,11 +31,12 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
+from graphed import services as graphed_services
 from graphed.core import ExecContext, ExecResult, Plan, RunControl, RunState, StopReason, Task
 from graphed.core.execution import (
     LocalResources,
@@ -48,6 +56,7 @@ from graphed_executors.local._reduce import plan_tree, running_fold
 from graphed_executors.local.executors import _PAUSED_WAKE_S, _wait_until, _Window
 
 from .protocol import SubmitBackend, SubmitFuture
+from .services import ServiceSet
 
 if TYPE_CHECKING:
     from graphed.core import Partition
@@ -253,9 +262,41 @@ def _event_from_dict(d: dict[str, object]) -> TaskEvent:
     )
 
 
+class _RunTasks:
+    """One run's plan-task submits (the ``_RunLeaves`` idiom): only the futures not yet done are held,
+    since a held dask future pins its result in cluster memory, and :meth:`cancel` cancels those."""
+
+    def __init__(self, backend: SubmitBackend) -> None:
+        self._backend = backend
+        self._lock = threading.Lock()
+        self._pending: set[SubmitFuture] = set()
+
+    def submit(self, fn: Callable[..., object], /, *args: object, key: str, retries: int) -> SubmitFuture:
+        fut = self._backend.submit(fn, *args, key=key, retries=retries)
+        with self._lock:
+            self._pending.add(fut)
+        fut.add_done_callback(self._done)  # outside the lock: a done future calls back at once
+        return fut
+
+    def _done(self, fut: SubmitFuture) -> None:
+        with self._lock:
+            self._pending.discard(fut)
+
+    def cancel(self) -> None:
+        """Cancel the run's plan tasks not yet done (best-effort, as ``backend.cancel`` is)."""
+        with self._lock:
+            pending = [fut for fut in self._pending if not fut.done()]  # a done one may not have called back
+        if pending:
+            self._backend.cancel(pending)
+
+
 class SubmitRunner:
     """A :class:`graphed.core.Executor` over any :class:`SubmitBackend`. ``run`` dispatches to the
-    adaptive path when the plan carries ``next_tasks``, else the fixed ``plan_tree`` future graph."""
+    adaptive path when the plan carries ``next_tasks``, else the fixed ``plan_tree`` future graph.
+
+    ``services`` (service name -> ``scheme://host:port``) are the leg-1 endpoints of every run, read
+    once at each run's start like ``monitor``; a user-held :class:`ServiceSet`'s endpoints keep its
+    services warm across runs."""
 
     def __init__(
         self,
@@ -265,11 +306,13 @@ class SubmitRunner:
         retries: int = 3,
         max_in_flight: int = 2,
         control: RunControl | None = None,
+        services: Mapping[str, str] | None = None,
     ) -> None:
         self._plans = PlanQueue(self.run, max_in_flight)
         self.backend = backend
         self.monitor = monitor  # read once at each run's start (Dashboard.attach assigns it)
         self.control = control  # likewise
+        self.services = services  # likewise
         self._retries = retries
 
     def __enter__(self) -> SubmitRunner:
@@ -294,15 +337,36 @@ class SubmitRunner:
         self.backend.close()
 
     def run(self, plan: Plan[R]) -> ExecResult[R]:
+        """Run ``plan``. Its services are resolved, checked, probed and bound before the first plan task
+        is submitted, and released, with any of its tasks not yet done, when ``run`` returns or raises."""
         monitor = self.monitor
         control = self.control
+        given = self.services
         ctx = self._context(uuid.uuid4().hex[:8], monitor)
+        with contextlib.ExitStack() as scope:  # the submission's scope: released in reverse on exit
+            return self._run_scoped(plan, monitor, control, given, ctx, scope)
+
+    def _run_scoped(
+        self,
+        plan: Plan[R],
+        monitor: Monitor | None,
+        control: RunControl | None,
+        given: Mapping[str, str] | None,
+        ctx: RunContext,
+        scope: contextlib.ExitStack,
+    ) -> ExecResult[R]:
         events_seen = [0]
         seen_lock = threading.Lock()  # handlers run on worker threads; += is not atomic without the GIL
         unsub: Callable[[], None] | None = None
         try:
             if control is not None and control.state is RunState.CANCELLED:
                 return ExecResult(plan.empty(), 0, 0, StopReason.CANCELLED)
+            bound = plan
+            if plan.services:
+                services = ServiceSet(plan.services, self.backend, endpoints=given, scope=ctx.run_nonce)
+                bound = graphed_services.bind_services(plan, scope.enter_context(services))
+            submits = _RunTasks(self.backend)
+            scope.callback(submits.cancel)  # registered after the services, so it runs before their release
             if ctx.monitor_topic is not None and ctx.events_per_leaf:
 
                 def handler(events: list[dict[str, object]]) -> None:
@@ -313,12 +377,18 @@ class SubmitRunner:
 
                 unsub = self.backend.subscribe_events(ctx.monitor_topic, handler)
             if control is not None:  # the default path never meets a window
-                if plan.next_tasks is not None:
-                    return self._run_adaptive_windowed(plan, monitor, control, ctx, events_seen)
-                return self._run_fixed_windowed(plan, monitor, control, ctx, events_seen)
-            if plan.next_tasks is not None:
-                return self._run_adaptive(plan, monitor, ctx, events_seen)
-            return self._run_fixed(plan, monitor, ctx, events_seen)
+                if bound.next_tasks is not None:
+                    result = self._run_adaptive_windowed(bound, monitor, control, ctx, events_seen, submits)
+                else:
+                    result = self._run_fixed_windowed(bound, monitor, control, ctx, events_seen, submits)
+            elif bound.next_tasks is not None:
+                result = self._run_adaptive(bound, monitor, ctx, events_seen, submits)
+            else:
+                result = self._run_fixed(bound, monitor, ctx, events_seen, submits)
+            if not plan.services:
+                return result
+            # graphed's walk, through collate and aggregate_plan, while the services are still up
+            return replace(result, value=graphed_services.resolve_services(bound, result.value))
         finally:
             if unsub is not None:
                 unsub()
@@ -333,6 +403,7 @@ class SubmitRunner:
         monitor: Monitor | None,
         ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         backend = self.backend
         tasks = sorted(plan.tasks, key=lambda t: t.key)  # deterministic leaf order
@@ -350,7 +421,7 @@ class SubmitRunner:
                     emit_task(monitor, self._submitted_event(task))  # driver-side SUBMITTED (leaves only)
                 key = _key(plan_fp, ctx.run_nonce, "leaf", i)
                 key_to_task[key] = task
-                futs[i] = backend.submit(
+                futs[i] = submits.submit(
                     _leaf_task, ctx, phandle, ptoken, task, key=key, retries=self._retries
                 )
             combines, root = plan_tree(n)
@@ -360,7 +431,7 @@ class SubmitRunner:
             chandle = backend.broadcast(cpayload, token=ctoken)
             for out, a, b in combines:  # a < b: deterministic left/right, the plan_tree shape
                 key = _key(plan_fp, ctx.run_nonce, "combine", out)
-                futs[out] = backend.submit(
+                futs[out] = submits.submit(
                     _combine_task, ctx, chandle, ctoken, futs[a], futs[b], key=key, retries=self._retries
                 )
             value = cast(R, self._result(futs[root], key_to_task))
@@ -376,6 +447,7 @@ class SubmitRunner:
         control: RunControl,
         ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         """``_run_fixed`` through a :class:`_Window`: the same ``plan_tree``, with each combine submitted
         once both inputs completed, so a cancel leaves completed subtrees to fold by first leaf."""
@@ -412,7 +484,7 @@ class SubmitRunner:
             i, task = item
             key = _key(plan_fp, ctx.run_nonce, "leaf", i)
             key_to_task[key] = task
-            fut = backend.submit(_leaf_task, ctx, phandle, ptoken, task, key=key, retries=self._retries)
+            fut = submits.submit(_leaf_task, ctx, phandle, ptoken, task, key=key, retries=self._retries)
             sent += 1
             node_of[fut] = i
             fut.add_done_callback(done_q.put)
@@ -441,7 +513,7 @@ class SubmitRunner:
                         out, a, b = combines[ci]
                         fa, fb = ready.pop(a), ready.pop(b)
                         key = _key(plan_fp, ctx.run_nonce, "combine", out)
-                        f2 = backend.submit(
+                        f2 = submits.submit(
                             _combine_task, ctx, chandle, ctoken, fa, fb, key=key, retries=self._retries
                         )
                         n_combines += 1
@@ -465,6 +537,7 @@ class SubmitRunner:
         monitor: Monitor | None,
         ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         assert plan.next_tasks is not None
         backend = self.backend
@@ -490,7 +563,7 @@ class SubmitRunner:
                     emit_task(monitor, self._submitted_event(task))
                 dask_key = _key(plan_fp, ctx.run_nonce, "leaf", seq)
                 key_to_task[dask_key] = task  # F2b: attribute a KilledWorker to this chunk (not the key)
-                fut = backend.submit(
+                fut = submits.submit(
                     _leaf_task, ctx, phandle, ptoken, task, key=dask_key, retries=self._retries
                 )
                 seq += 1
@@ -527,6 +600,7 @@ class SubmitRunner:
         control: RunControl,
         ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         """``_run_adaptive`` with each ``next_tasks`` batch held in a :class:`_Window`."""
         assert plan.next_tasks is not None
@@ -557,7 +631,7 @@ class SubmitRunner:
             nonlocal seq
             dask_key = _key(plan_fp, ctx.run_nonce, "leaf", seq)
             key_to_task[dask_key] = task  # F2b: attribute a KilledWorker to this chunk (not the key)
-            fut = backend.submit(_leaf_task, ctx, phandle, ptoken, task, key=dask_key, retries=self._retries)
+            fut = submits.submit(_leaf_task, ctx, phandle, ptoken, task, key=dask_key, retries=self._retries)
             seq += 1
             outstanding[fut] = (task.key, task.partition.n_entries)
             fut.add_done_callback(done_q.put)  # backend-neutral as_completed (queue.Queue)

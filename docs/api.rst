@@ -20,7 +20,10 @@ imported only when it submits. Every
 executor and runner has ``run(plan)`` and ``submit(plan)``, which returns a future so you can
 record the next plan while this one runs, and honours a ``graphed.core.RunControl`` for pausing
 and cancelling — ``control=`` on the local executors and ``SubmitRunner``, the ``control``
-attribute on what ``dask_runner`` and ``parsl_runner`` return.
+attribute on what ``dask_runner`` and ``parsl_runner`` return. A plan that calls a server
+(``plan.services``) gets its endpoints from ``SubmitRunner``'s ``services=`` or a started
+``graphed_executors.submit.services.ServiceSet``, the site, or a start from its recipe
+(``graphed_executors.submit.recipes``); :doc:`htcondor` has the details.
 
 .. autosummary::
    :toctree: generated

@@ -37,7 +37,10 @@ def test_coveragerc_htcondor_gates_exactly_the_backend() -> None:
     parser = configparser.ConfigParser()
     parser.read(path)
     sources = {line.strip() for line in parser.get("run", "source").splitlines() if line.strip()}
-    assert sources == {"graphed_executors.htcondor_backend"}, sources
+    # amended at m68a (owner ruling, 2026-09-28): plan-services §6 adds the engine's service set, which
+    # these suites drive through pilots and driver jobs; nothing else may join the backend
+    assert "graphed_executors.htcondor_backend" in sources, sources
+    assert sources - {"graphed_executors.htcondor_backend"} <= {"graphed_executors.submit.services"}, sources
     assert parser.getboolean("run", "branch") is True
     assert parser.getboolean("run", "parallel") is True
     assert parser.getboolean("run", "sigterm") is True

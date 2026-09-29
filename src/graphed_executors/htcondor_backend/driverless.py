@@ -12,11 +12,13 @@ import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from graphed.core.execution import ExecResult, Plan
+from graphed.services import split_endpoint
 
 from . import launch
 from .backend import _require_importable
@@ -98,7 +100,15 @@ class RunHandle:
             raise RuntimeError(f"cluster {self.cluster} is {status}: it has no result yet")
         if in_queue and SITES[self.site].spool:
             schedd.retrieve(f"ClusterId == {self.cluster}")
-        ok, payload = pickle.loads((Path(self.log_dir) / RESULT_FILE).read_bytes())
+        # result.pkl crossed from the job's environment to this one, whose load is the authority
+        blob = (Path(self.log_dir) / RESULT_FILE).read_bytes()  # a missing file raises as itself
+        try:
+            ok, payload = pickle.loads(blob)
+        except Exception as exc:
+            raise RuntimeError(
+                f"cluster {self.cluster}'s {RESULT_FILE} does not load here ({type(exc).__name__}: {exc}); "
+                f"see {LOG_FILE} in {self.log_dir}"
+            ) from exc
         if not ok:
             raise payload
         return cast("ExecResult[Any]", payload)
@@ -137,15 +147,23 @@ def submit_driverless(
     min_pilots: int = 1,
     retries: int = 3,
     max_in_flight: int = 2,
+    services: Mapping[str, str] | None = None,
 ) -> RunHandle:
     """Submit ``plan`` as ONE job on ``site`` whose driver runs it over ``n_pilots`` pilots:
     ``pilots="local"`` starts them in the job's own slot (``request_cpus=n_pilots``), ``pilots="condor"``
     submits them as jobs from inside the driver job (sites whose jobs can submit, with ``worker_ports``).
     ``log_dir`` receives the submit files and the returned ``result.pkl`` and ``driver.log``;
-    ``user_modules`` and ``env`` are shipped as for :class:`CondorPilots`. Everything is refused before
-    the bindings are touched."""
+    ``user_modules`` and ``env`` are shipped as for :class:`CondorPilots`. ``services`` (service name ->
+    ``scheme://host:port``) are the run's given endpoints, which the driver job checks instead of
+    starting those services. Everything is refused before the bindings are touched."""
     if pilots not in ("local", "condor"):
         raise ValueError(f"pilots={pilots!r}: 'local' (in the driver's slot) or 'condor' (jobs it submits)")
+    endpoints = dict(services or {})
+    for name, endpoint in endpoints.items():
+        try:
+            split_endpoint(endpoint)
+        except ValueError as exc:
+            raise ValueError(f"services[{name!r}]: {exc}") from None
     profile = SITES[site]
     if pilots == "condor" and not profile.jobs_can_submit:
         raise ValueError(
@@ -216,9 +234,12 @@ def submit_driverless(
         "max_in_flight": max_in_flight,
         "schedd_locate": [str(htc.param["COLLECTOR_HOST"]), name] if pilots == "condor" else None,
         "user_modules": [Path(m).name for m in launcher.user_modules],
+        "endpoints": endpoints,
     }
     (out / RUN_FILE).write_text(json.dumps(run, indent=1))
-    result = launcher._submit(htc, schedd, desc, 1)
+    with ExitStack() as on_error:  # a failed spool must not leave the job queued
+        result = launcher._submit(htc, schedd, desc, 1, on_error)
+        on_error.pop_all()  # submitted: the job outlives this session
     return RunHandle(
         site=site, schedd=name, cluster=int(result.cluster()), log_dir=out, submitted_at=time.time()
     )

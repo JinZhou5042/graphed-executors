@@ -55,6 +55,7 @@ from graphed.core.execution import (
     worker_monitor_factory,
 )
 from graphed.debug import StageError
+from graphed.services import require_bound
 
 from .._plan_queue import PlanQueue
 from ._peer import (
@@ -756,7 +757,9 @@ class _BaseExecutor:
 
     def run(self, plan: Plan[R]) -> ExecResult[R]:
         """Run ``plan`` to its reduced result. One plan runs at a time per executor; a concurrent
-        caller waits for the running plan to finish."""
+        caller waits for the running plan to finish. A plan whose services are not bound is refused
+        before any task (this runner resolves no services: bind them, or use ``SubmitRunner``)."""
+        require_bound(plan)
         with self._run_lock:
             self._switch_in(self.monitor)
             self._run_monitor = self.monitor

@@ -14,10 +14,12 @@ concurrency:
 env:
   # the former core/debug/frontend/numpy/awkward siblings are now one consolidated package
   # Pinned, not @main: graphed is an unpinned upstream whose merges can redden this frozen suite with
-  # no local change. At the multi-output-plans PR's head (m72: writes=, collate, parquet_write) until
-  # it merges, then its merge commit, then the first release carrying it. A git install builds the
-  # Rust core, so every job installing it needs a Rust toolchain.
-  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@49454d41e3b4fae05214ba67396b01fef9123f1a"
+  # no local change. At graphed#63's merge commit on main (the resolve walk: resolve_services forwarded
+  # through collate and aggregate_plan), above the service surface of #58/#61 (ServiceSpec,
+  # split_endpoint, bind_services, require_bound) that m68a runs on. Moves to the first release carrying
+  # both. A git install builds the Rust core, so every job installing it needs a Rust
+  # toolchain.
+  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@d0ad16bc34c59583e967bf557af68d664dc323de"
   # corpus stays a separate package (test fixtures only, not shipped in the graphed wheel)
   CORPUS: "graphed-corpus @ git+https://github.com/graphed-org/graphed-corpus-mvp@main"
   # The frozen tree fills real histograms across the process boundary. Unlike CORPUS, omitting this
@@ -45,8 +47,19 @@ jobs:
         with:
           fetch-depth: 0
       - uses: actions/setup-python@v5
+        if: runner.os != 'macOS'
         with:
           python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Python from uv (macOS)
+        # setup-python's macOS builds stall 35-70 s in each loopback reverse lookup (socket.getfqdn) on
+        # macOS 15+ runners (actions/setup-python#1223); uv's python-build-standalone does not.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          uv venv --seed --python-preference only-managed --python ${{ matrix.python }} "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/venv/bin/python" -c "import socket, time; t = time.monotonic(); socket.getfqdn(); print(f'getfqdn() in {time.monotonic() - t:.2f}s')"
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps + this package
         shell: bash
@@ -54,7 +67,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" "${{ env.HISTOGRAM }}"
           python -m pip install -e ".[dev]"
-      - uses: astral-sh/setup-uv@v5
+          # the reference gRPC health servicer the m68a readiness checks are tested against (with grpcio)
+          python -m pip install grpcio-health-checking
       - name: Lint + types (pre-commit hooks via prek)
         run: uvx prek@0.4.5 run --all-files --show-diff-on-failure
       - name: Pytest (frozen + extra) + whole-package coverage (>=90%)
@@ -132,6 +146,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" pyarrow pandas
           python -m pip install -e ".[dev,dask]"
+          # submit/ is gated here too: tests/extra/m68a covers the service set, its gRPC check included
+          python -m pip install grpcio-health-checking
       - name: Pytest m42+m43+m44+m45 dask suite + extra witnesses + scoped coverage gate (>=90%)
         # bare `--cov` (m46, tests-B-cov-2): a path-valued `--cov=` OVERRIDES the config `[run] source`
         # (verified pytest-cov 7.1.0), which would silently discard the m46-added `common.tasks_engine`
@@ -142,7 +158,8 @@ jobs:
             tests/frozen/m65/test_m65a3_control_dask.py tests/frozen/m65/test_m65a3_control_submit.py \
             tests/frozen/m65/test_m65a3_control_stop.py \
             tests/frozen/m65/test_m65b_push_submit.py tests/frozen/m65/test_m65b_push_dask.py \
-            tests/extra/m43 tests/extra/m44 \
+            tests/frozen/m68a/test_scope_dask_memory.py \
+            tests/extra/m43 tests/extra/m44 tests/extra/m68a \
             --cov-config=.coveragerc-dask \
             --cov-branch --cov \
             --cov-report=term-missing
@@ -255,13 +272,15 @@ jobs:
           fi
 
   # The direct HTCondor backend (graphed_executors.htcondor_backend) needs the htcondor bindings, which
-  # ship Linux wheels only, and a pool: this job installs a personal HTCondor and runs the m66 and m67
-  # suites against it. Local pilots and drivers inherit COVERAGE_PROCESS_START and self-measure as in
-  # test-parsl; COVERAGE_FILE is absolute because a driver runs in a job scratch dir, not the workspace.
+  # ship Linux wheels only, and a pool: this job installs a personal HTCondor and runs the m66, m67 and
+  # m68a suites against it, with a Triton container serving tests/frozen/m68a/data/triton_models on
+  # gRPC for the m68a service legs. Local pilots and drivers inherit COVERAGE_PROCESS_START and
+  # self-measure as in test-parsl; COVERAGE_FILE is absolute because a driver runs in a job scratch
+  # dir, not the workspace.
   test-htcondor:
     name: test-htcondor py3.12
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45  # m68a: + pulling the Triton image (several GB) and its model load
     steps:
       - uses: actions/checkout@v4
         with:
@@ -270,6 +289,14 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+      - name: Free disk for the Triton image
+        # the tritonserver image is ~15 GB unpacked; the runner starts with less free than that
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force
+          df -h /
       - name: Start a personal HTCondor pool
         shell: bash
         run: |
@@ -291,15 +318,37 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" "${{ env.HISTOGRAM }}"
           python -m pip install -e ".[dev,htcondor]"
-      - name: Pytest frozen m66 + m67 on the pool + scoped coverage gate (>=90%)
+          python -m pip install "tritonclient[grpc]" grpcio-health-checking
+      - name: Start the Triton container
+        # recipes.triton's argv at port 8001 (gRPC only), serving the m68a model repository; waited on
+        # with the engine's own check_ready (the grpc.health.v1 Check, SERVING once the model loads)
+        shell: bash
+        run: |
+          docker run -d --name graphed-triton -p 8001:8001 \
+            -v "${{ github.workspace }}/tests/frozen/m68a/data/triton_models:/models:ro" \
+            nvcr.io/nvidia/tritonserver:25.11-pyt-python-py3 \
+            tritonserver --model-repository=/models --grpc-port=8001 --allow-http=false --allow-metrics=false
+          python - <<'PY'
+          import sys, time
+          from graphed_executors.submit.services import check_ready
+          deadline = time.monotonic() + 600
+          while (reason := check_ready("grpc://localhost:8001", "grpc:", 10.0)) is not None:
+              if time.monotonic() > deadline:
+                  sys.exit(f"the Triton container never became ready: {reason}")
+              time.sleep(5)
+          print("Triton ready on grpc://localhost:8001")
+          PY
+      - name: Pytest frozen m66 + m67 + m68a on the pool + scoped coverage gate (>=90%)
         # a bare `--cov` keeps the rcfile's source; a path-valued one overrides it (see test-parsl)
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/.coveragerc-htcondor
           COVERAGE_RCFILE: ${{ github.workspace }}/.coveragerc-htcondor
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
+          GRAPHED_TRITON_GRPC: localhost:8001
         run: |
           python -c "import sysconfig, pathlib; pathlib.Path(sysconfig.get_path('purelib'), 'graphed_subcov.pth').write_text('import coverage; coverage.process_startup()\n')"
           pytest tests/frozen/m66 tests/extra/m66 tests/frozen/m67 tests/extra/m67 \
+            tests/frozen/m68a tests/extra/m68a \
             --cov --cov-config=.coveragerc-htcondor \
             --cov-branch --cov-fail-under=0
           mv .coverage .coverage.driver
@@ -317,7 +366,13 @@ jobs:
           git fetch origin main
           coverage xml --rcfile=.coveragerc-htcondor -o coverage.xml
           diff-cover coverage.xml --compare-branch=origin/main --fail-under=98 \
-            --include "src/graphed_executors/htcondor_backend/**/*.py"
+            --include "src/graphed_executors/htcondor_backend/**/*.py" "src/graphed_executors/submit/services.py"
+      - name: Stop the Triton container
+        if: always()
+        shell: bash
+        run: |
+          docker logs graphed-triton 2>&1 | tail -n 50 || true
+          docker rm -f graphed-triton || true
 
   # m69a: examples/hgg against the original H->gg script as oracle. The main matrix has no coffea, so
   # tests/frozen/m69a skips there; here GRAPHED_HGG_REQUIRED=1 turns a missing dependency into a failure.

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import graphed_executors.local.shuffle as shuffle_mod
+from graphed_executors.local._transport import LookupFreeHTTPServer
 from graphed_executors.local.shuffle import _make_block_handler, _make_cluster, _store_server_handler
 
 
@@ -68,12 +69,12 @@ def test_routable_store_child_serves_over_a_real_socket_and_announces_ready(
 ) -> None:
     captured: list[ThreadingHTTPServer] = []
 
-    class _CapturingServer(ThreadingHTTPServer):
+    class _CapturingServer(LookupFreeHTTPServer):
         def __init__(self, *a: object, **k: object) -> None:
             super().__init__(*a, **k)  # type: ignore[arg-type]
             captured.append(self)
 
-    monkeypatch.setattr(shuffle_mod, "ThreadingHTTPServer", _CapturingServer)
+    monkeypatch.setattr(shuffle_mod, "LookupFreeHTTPServer", _CapturingServer)
     # Fix the advertise host instead of letting the child auto-detect one: detection dials the
     # runner's real network (select_advertise_host(None)) and has no bound on a sandboxed/offline
     # CI host, which timed out the ready_q.get() below on macOS runners.

@@ -20,6 +20,28 @@ Run on an HTCondor pool
   ``SiteProfile`` gains ``worker_ports``, ``service_ports`` and ``jobs_can_submit``. See
   :doc:`htcondor`.
 
+Services a plan calls
+~~~~~~~~~~~~~~~~~~~~~
+
+* ``SubmitRunner`` (and ``dask_runner``, ``parsl_runner``, ``htcondor_runner``) resolves the services
+  a plan declares (``plan.services``, graphed's ``ServiceSpec``) for each run: an endpoint you pass
+  as ``services={name: "scheme://host:port"}``, else the site's (``SiteProfile.services``; the
+  ``lpc`` row names the EAF inference server), else one it starts beside the driver from the spec's
+  recipe and stops when the run ends. Each endpoint is checked (``tcp``, ``http:<path>`` or the gRPC
+  health check) where it runs and from a worker before the first task, bound into the plan, and the
+  run's value is resolved while the services are up. ``ServiceSet`` keeps services warm across
+  plans; ``graphed_executors.submit.recipes`` has ``triton`` and ``http_server`` recipes. See
+  :doc:`htcondor`.
+* ``submit_driverless(..., services=)`` passes endpoints to a driverless run, whose driver job
+  resolves the rest with its own site row; a service it cannot reach or start exits 1 and is
+  retried. A ``result.pkl`` that does not load in your session raises a ``RuntimeError`` naming the
+  load error and ``driver.log``.
+* The runners that resolve no services (the local executors, the peer reductions) refuse a plan
+  whose services are unbound before running any task.
+* This needs ``graphed.services``, which no graphed release has yet (0.0.6 does not): CI installs
+  graphed from git, and graphed-executors will not be released until its ``graphed`` floor moves to
+  the release carrying the service surface and its resolve walk.
+
 An H→γγ analysis on graphed
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

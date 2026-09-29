@@ -290,7 +290,8 @@ exit code decides whether HTCondor runs it again:
      - No
    * - 1
      - Anything another attempt may get past: the run's workers were lost (every pilot preempted,
-       say), pilots could not start, or the driver failed before or after the run.
+       say), pilots could not start, a service the plan needs could not be reached or started
+       (see `Services`_), or the driver failed before or after the run.
      - Twice
    * - 3
      - The plan's own code raised; it would raise again.
@@ -302,6 +303,68 @@ done, failed or removed, so ``wait(timeout=None)`` does not return while the job
 ``timeout``, or check ``status()`` for ``held``. Everything a pilot cannot import (a lambda, a
 function defined in ``__main__``) is refused before anything is written or submitted, as for
 ``htcondor_runner``.
+
+
+Services
+--------
+
+Some analyses call a server while they run: an inference server a node sends its rows to, say.
+The analysis declares each one as a ``graphed.services.ServiceSpec`` (a name, a ``kind`` and a
+readiness ``check``, with an optional ``Launch`` recipe that starts one), and its nodes name it; the
+plan carries the specs it references as ``plan.services``. Where the service is — its *endpoint*,
+``scheme://host:port`` — is not part of the analysis: the runner finds one for each run.
+
+It tries three places, in order:
+
+1. **An endpoint you give it**: ``htcondor_runner(..., services={"triton": "grpc://host:8001"})``,
+   ``SubmitRunner(backend, services=...)``, or ``submit_driverless(..., services=...)``. If it fails
+   its check the run is refused, naming it: an endpoint you asked for is never swapped for another.
+2. **The site's**: ``SiteProfile.services`` maps a ``kind`` to the endpoint the site hosts it at.
+   The ``lpc`` row names the Elastic Analysis Facility's inference server
+   (``grpcs://triton.fnal.gov:443``); ``lxplus`` and ``generic`` host none. A site endpoint that
+   fails its check is passed over, and the reason is kept.
+3. **One it starts**, from the spec's recipe, beside the driver when the recipe needs no image and
+   no GPU and the site lets workers reach the driver's host (``service_hosts``); it is stopped when
+   the run ends. A recipe that needs an image or a GPU needs cluster hosting, which this release does
+   not have yet, so such a run is refused naming ``host_service``.
+
+``graphed_executors.submit.recipes`` has two recipes as plain data: ``triton(name, image,
+model_repository)`` (gRPC only, one port) and ``http_server(name)`` (Python's ``http.server``).
+
+**Wires and checks.** The endpoint's scheme is the wire: ``tcp``, ``http``, ``https``, ``grpc`` or
+``grpcs`` (the ``s`` ones are TLS); a bare ``host:port`` is refused. The spec's ``check`` is ``"tcp"``
+(a connect), ``"http:<path>"`` (a GET that must answer 2xx, and not with a gRPC content type) or
+``"grpc:<service>"`` (the standard gRPC health check, which needs ``grpcio``). A check runs only over
+a wire that can carry it: an ``http:`` check against a ``grpc://`` endpoint fails without dialling,
+because a gRPC gateway answers HTTP 200 to every path.
+
+**Checked from a worker.** Passing the check on the driver's host proves little about the execute
+nodes, so before the plan's first task the runner submits a small probe task that runs the same
+checks from a pilot: one task checks every service the run needs, and the runner waits for its
+answer up to the largest ``timeout_s`` among those services. A service the runner started must also
+answer a pilot on another host than its own, unless that host is the driver's (a run on one
+machine). A service no pilot can reach fails the run with ``ServiceUnreachable`` naming the endpoint, the worker and the reason; ``"no worker
+answered"`` means no pilot ran the probe within that wait, and ``"only same-host
+workers answered"`` that none on another host did.
+
+**Kept warm across plans.** A started service lives as long as the run that started it. To use one
+server for several plans, start it yourself and pass its endpoints to the runner:
+
+.. code-block:: python
+
+    from graphed_executors.submit.services import ServiceSet
+
+    with htcondor_runner(site="generic", n_pilots=4) as runner:
+        runner.wait_for_pilots()
+        with ServiceSet(plan.services, runner.backend) as endpoints:
+            runner.services = endpoints
+            first = runner.run(plan)
+            second = runner.run(other_plan)
+
+Each run logs how it satisfied every service on the ``graphed_executors.services`` logger (the
+record's ``status`` attribute is a ``ServiceStatus``: leg, endpoint, host, times). A driverless job
+resolves the services in the driver job, by the same three places, with the job's own site row; a
+service it cannot reach or start there exits 1, so HTCondor retries it.
 
 
 The arguments you will change

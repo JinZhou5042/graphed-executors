@@ -43,7 +43,7 @@ import urllib.request
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,7 @@ from graphed.shuffle import (
     join_blocks,  # the generic radix-hash join kernel over a JoinBackend (M40)
 )
 
-from ._transport import select_advertise_host
+from ._transport import LookupFreeHTTPServer, select_advertise_host
 
 #: one parquet row-group's worth of writer-buffer staging (the documented O(P*rg) memory knob, §5.1).
 ROW_GROUP_BYTES: int = 1 << 20  # 1 MiB
@@ -226,7 +226,7 @@ class _HttpNode:
         self.blocks: dict[str, bytes] = {}
         self.dir = store_dir
         (store_dir / "objects").mkdir(parents=True, exist_ok=True)
-        self._server = ThreadingHTTPServer((host, 0), _make_block_handler(self.blocks))
+        self._server = LookupFreeHTTPServer((host, 0), _make_block_handler(self.blocks))
         self.host = str(self._server.server_address[0])
         self.port = int(self._server.server_address[1])
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -1013,7 +1013,7 @@ def _routable_store_child(node_id: int, store_root: str, advertise_host: str, re
     objects = store_dir / "objects"
     objects.mkdir(parents=True, exist_ok=True)
     host = select_advertise_host(advertise_host)  # ValueError on loopback/0.0.0.0 — never bind non-routable
-    server = ThreadingHTTPServer((host, 0), _store_server_handler(objects, os.getpid(), host))
+    server = LookupFreeHTTPServer((host, 0), _store_server_handler(objects, os.getpid(), host))
     ready_q.put((node_id, str(server.server_address[0]), int(server.server_address[1]), os.getpid()))
     server.serve_forever()
 

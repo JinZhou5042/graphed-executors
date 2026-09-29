@@ -1,6 +1,13 @@
 """``HTCondorBackend``: a :class:`SubmitBackend` at the all-False floor whose workers are pilots it
 launches itself. Pilots pull pickled tasks from the backend's :class:`TaskServer` and post results
 back; the driver resolves future arguments before a task is queued, so pilots never talk to each other.
+
+The backend's service surface is duck-typed, read by the engine's service set (``submit/services.py``):
+``site_services``, ``service_hosts`` and ``service_ports`` come from the site row, ``advertise_host``
+is the task server's host, and ``host_identity()`` names the driver's host as condor writes it for that
+host's slots. Attached, the row is the launcher's profile; in a driver job (``in_job=``) it is the job's
+own site row, and a managed service may start only beside the driver. ``host_service`` is not here:
+cluster hosting is a later seam.
 """
 
 from __future__ import annotations
@@ -20,7 +27,9 @@ from graphed.core.execution import ExecResult, Plan
 from graphed_executors.parsl_backend.backend import _ParslFuture
 from graphed_executors.submit import SubmitCapabilities, SubmitRunner
 from graphed_executors.submit.protocol import SubmitFuture
+from graphed_executors.submit.services import host_identity, release_quietly
 
+from . import launch as _launch
 from .launch import CondorPilots, PilotLauncher
 from .server import TaskServer, WorkerLost
 from .sites import SITES, SiteProfile
@@ -46,7 +55,8 @@ class HTCondorBackend:
 
     ``host`` is the name pilots dial back to (default: this machine's FQDN); the server binds the
     first free port of ``port_range`` on all interfaces, by default the ``driver_ports`` of the
-    launcher's site profile (``generic`` for a launcher without one).
+    launcher's site profile (``generic`` for a launcher without one). ``in_job`` is the site row of the
+    driver job this backend runs in (``driver.py`` passes it), else ``None`` (attached).
     """
 
     def __init__(
@@ -56,23 +66,38 @@ class HTCondorBackend:
         *,
         host: str | None = None,
         port_range: tuple[int, int] | None = None,
+        in_job: SiteProfile | None = None,
     ) -> None:
         self.capabilities = _FLOOR
         self.launcher = launcher
         self._handlers: dict[str, Callable[[list[dict[str, object]]], None]] = {}
         profile: SiteProfile = getattr(launcher, "profile", SITES["generic"])
+        self.advertise_host = host or socket.getfqdn()
+        self._in_job = in_job
+        self.service_ports: tuple[int, int] | None
+        if in_job is None:
+            self.site_services = profile.services
+            self.service_hosts = profile.service_hosts
+            self.service_ports = profile.service_ports
+        else:  # beside the driver only; reached like the task server (self-submitted pilots: worker_ports)
+            self.site_services = in_job.services
+            self.service_hosts = ("driver",)
+            self.service_ports = in_job.worker_ports if isinstance(launcher, CondorPilots) else None
         low, high = port_range if port_range is not None else profile.driver_ports
         try:
-            self._server = TaskServer(host or socket.getfqdn(), (low, high), launcher)
+            self._server = TaskServer(self.advertise_host, (low, high), launcher)
         except OSError as exc:
             raise OSError(
                 f"no free port for the task server: site={profile.name} ports={low}-{high}"
             ) from exc
-        with ExitStack() as on_error:  # a refused start must not leave the server holding its port
-            on_error.callback(self._server.shutdown)
-            on_error.callback(self._server.close)
+        with ExitStack() as stack:  # a refused start must not leave the server holding its port
+            stack.callback(release_quietly, "the task server's port", self._server.shutdown)
+            stack.callback(release_quietly, "the task server", self._server.close)
             launcher.start(self._server.url, self._server.secret, n_pilots)
-            on_error.pop_all()
+            stack.callback(release_quietly, "the pilots", launcher.stop)
+            # closed first: pilots see 410 and exit before they are stopped (a second close is a no-op)
+            stack.callback(release_quietly, "the task server", self._server.close)
+            self._stack = stack.pop_all()
 
     def n_workers(self) -> int:
         """Pilots registered and live right now; never waits."""
@@ -126,10 +151,17 @@ class HTCondorBackend:
     def describe_failure(self, exc: BaseException) -> tuple[str, str] | None:
         return (exc.key, exc.pilot) if isinstance(exc, WorkerLost) else None
 
+    def host_identity(self) -> str:
+        """The driver's host as condor writes ``Machine`` for its slots: ``FULL_HOSTNAME`` attached (the
+        only bindings use here), the job's own machine ad in a driver job."""
+        if self._in_job is not None:
+            return host_identity()
+        return str(_launch._htcondor().param["FULL_HOSTNAME"])
+
     def close(self) -> None:
-        self._server.close()
-        self.launcher.stop()
-        self._server.shutdown()
+        """Stop serving (pilots see 410 and exit), stop the pilots, free the port; each step runs even
+        when an earlier one fails, and each failure is logged."""
+        self._stack.close()
 
 
 class _MainProbe(pickle.Unpickler):
@@ -165,8 +197,11 @@ class HTCondorRunner(SubmitRunner):
         monitor: Any = None,
         retries: int = 3,
         max_in_flight: int = 2,
+        services: Mapping[str, str] | None = None,
     ) -> None:
-        super().__init__(backend, monitor=monitor, retries=retries, max_in_flight=max_in_flight)
+        super().__init__(
+            backend, monitor=monitor, retries=retries, max_in_flight=max_in_flight, services=services
+        )
         self._min_pilots = min_pilots
         self._waited = False
 
@@ -201,10 +236,11 @@ def htcondor_runner(
     monitor: Any = None,
     retries: int = 3,
     max_in_flight: int = 2,
+    services: Mapping[str, str] | None = None,
 ) -> HTCondorRunner:
     """``n_pilots`` pilot jobs on the ``site`` pool behind an :class:`HTCondorRunner`;
     ``runner.close()`` removes them. ``port_range`` is the driver-side port range; default from the
-    site profile."""
+    site profile. ``services`` are the runner's given service endpoints."""
     pilots = CondorPilots(
         site,
         image=image,
@@ -217,5 +253,10 @@ def htcondor_runner(
     )
     backend = HTCondorBackend(pilots, n_pilots, host=host, port_range=port_range)
     return HTCondorRunner(
-        backend, min_pilots=min_pilots, monitor=monitor, retries=retries, max_in_flight=max_in_flight
+        backend,
+        min_pilots=min_pilots,
+        monitor=monitor,
+        retries=retries,
+        max_in_flight=max_in_flight,
+        services=services,
     )

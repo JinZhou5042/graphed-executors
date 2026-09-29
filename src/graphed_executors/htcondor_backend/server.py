@@ -27,9 +27,10 @@ from concurrent.futures import CancelledError, Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 
+from graphed_executors.local._transport import LookupFreeHTTPServer
 from graphed_executors.parsl_backend._shim import _parsl_task_shim
 from graphed_executors.parsl_backend.backend import _ParslFuture
 
@@ -74,7 +75,7 @@ class _Task:
     requeued: bool = False
 
 
-class _Http(ThreadingHTTPServer):
+class _Http(LookupFreeHTTPServer):
     daemon_threads = True
     # SO_REUSEADDR lets Windows bind a port another server still listens on; elsewhere it only
     # skips TIME_WAIT, which the port scan needs across back-to-back runs
