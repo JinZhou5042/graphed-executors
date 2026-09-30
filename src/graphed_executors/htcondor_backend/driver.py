@@ -4,11 +4,13 @@
 ``run.json``. The driver runs the plan with :class:`HTCondorRunner` over :class:`LocalPilots` in its own
 slot (``pilots="local"``) or over pilot jobs it submits itself (``pilots="condor"``, to the schedd named
 by ``run.json["schedd_locate"]``), and on every exit writes ``result.pkl`` = ``(ok, ExecResult |
-exception)`` and ``driver.log`` for the output transfer.
+exception)`` and ``driver.log`` for the output transfer (``driver.sh`` writes a placeholder of both first).
 
 The plan's services are resolved here, in the driver job, by the engine's three legs: the
 ``run.json["endpoints"]`` the submitter gave (leg 1), the job's own site row (leg 2), or a managed
-start beside the driver (leg 3); the run then re-checks and probes them as leg-1 endpoints inside
+start (leg 3), beside the driver or, for a name in ``run.json["announce_only"]``, by the announce of
+the run's DAG SERVICE node, to which the driver publishes its url and an announce secret in
+``run.json["dag_dir"]``; the run then re-checks and probes them as leg-1 endpoints inside
 ``runner.run`` and resolves its value while they are still up.
 
 ``main`` classifies an exit by phase, and only inside ``runner.run(plan)`` by type:
@@ -21,8 +23,9 @@ start beside the driver (leg 3); the run then re-checks and probes them as leg-1
   pilot preempted; *owner ruling 2026-09-25*), and the run's own service phase (``ServiceUnavailable``,
   ``ServiceUnreachable`` and a probe's raw ``WorkerLost``; *this plan's decision*).
 - 3: every other exception from ``runner.run(plan)``: the plan's own error, deterministic, so the job's
-  ``retry_until`` stops retrying it. A ``StageError`` (*owner ruling 2026-09-25*) or a task's exception
-  re-raised intact, such as a ``ValueError`` (*this plan's decision*).
+  ``retry_until`` (a DAG's ``RETRY driver 2 UNLESS-EXIT 3``) stops retrying it. A ``StageError``
+  (*owner ruling 2026-09-25*) or a task's exception re-raised intact, such as a ``ValueError`` (*this
+  plan's decision*).
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import logging
 import os
 import pickle
 import sys
+import tempfile
 import time
 import traceback
 from contextlib import ExitStack
@@ -48,8 +52,9 @@ from graphed_executors.submit.services import (
     release_quietly,
 )
 
+from .announce import URL_FILE
 from .backend import HTCondorBackend, HTCondorRunner
-from .launch import LOG_FILE, PLAN_FILE, RESULT_FILE, RUN_FILE, CondorPilots, LocalPilots
+from .launch import LOG_FILE, PLAN_FILE, RESULT_FILE, RUN_FILE, SECRET_FILE, CondorPilots, LocalPilots
 from .server import WorkerLost
 from .sites import SITES
 
@@ -60,6 +65,7 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
     """The job's runner over its pilots; the backend is released if anything after it fails."""
     profile = SITES[run["site"]]
     n = int(run["n_pilots"])
+    announced: dict[str, str] = run.get("announce_only") or {}
     if run["pilots"] == "condor":
         launcher: Any = CondorPilots(
             profile,
@@ -68,15 +74,25 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
             log_dir=run["log_dir"],
             user_modules=[job / name for name in run["user_modules"]],
             schedd_locate=tuple(run["schedd_locate"]),
+            extra_submit=run.get("extra_submit"),
         )
-        host, ports = host_identity(), profile.worker_ports
     else:
-        # the slot's own pilots dial loopback; any free port serves them
         launcher = LocalPilots(python=sys.executable, pythonpath=[job])
+    if run["pilots"] == "condor" or announced:  # dialled from other nodes: pilot jobs, SERVICE nodes
+        host, ports = host_identity(), profile.worker_ports
+    else:  # the slot's own pilots dial loopback; any free port serves them
         host, ports = "127.0.0.1", profile.worker_ports or (0, 0)
     with ExitStack() as on_error:  # held until the runner exists: a failure after the pilots stops them
-        backend = HTCondorBackend(launcher, n, host=host, port_range=ports, in_job=profile)
+        backend = HTCondorBackend(
+            launcher, n, host=host, port_range=ports, in_job=profile, announced=announced
+        )
         on_error.callback(release_quietly, "the driver job's backend", backend.close)
+        if announced:
+            dag_dir = Path(run["dag_dir"])
+            # the secret first: a SERVICE node that reads the new url reads the new secret with it
+            secret = backend._server.announce_secret(sorted(announced.values()))
+            _publish(dag_dir / SECRET_FILE, secret.hex())
+            _publish(dag_dir / URL_FILE, backend._server.url)
         if run["pilots"] == "condor":
             where = f"cluster={launcher.cluster}"
         else:
@@ -90,6 +106,14 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
         )
         on_error.pop_all()
     return runner
+
+
+def _publish(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` at once, readable by this user only (``mkstemp``'s mode)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def _result_blob(ok: bool, payload: object) -> bytes:

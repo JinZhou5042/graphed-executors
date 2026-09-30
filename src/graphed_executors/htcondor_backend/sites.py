@@ -2,7 +2,7 @@
 
 A :class:`SiteProfile` holds the submit keys a site needs (templates over ``{image}``, ``{uid}``,
 ``{user}`` and ``{home}``), whether its schedd needs spooled sandboxes, whether pilots get the driver's
-venv shipped as ``env.tgz``, the directory tree its schedd can read, how to find a schedd, the
+venv shipped as ``env.tgz``, the directory trees its schedd and its jobs read, how to find a schedd, the
 driver-side ports its execute nodes can reach, and the services the site hosts (kind -> endpoint), the
 second leg of a run's service set.
 """
@@ -30,6 +30,9 @@ class SiteProfile:
     binds on the submit host. ``service_ports`` is the range of login-node ports execute nodes reach for
     a service beside the driver, ``worker_ports`` the range one execute node reaches on another; ``None``
     means no such port was measured open. ``jobs_can_submit`` is whether a job there may submit jobs.
+    ``job_root`` is the tree the schedd and every job read and write directly, so a job-submitted
+    cluster's ``initialdir`` and a DAG's directory and inputs must lie under it (``"/"``: every path;
+    ``None``: no such tree).
     ``services`` maps a service ``kind`` to the endpoint (``scheme://host:port``) the site hosts it
     at; a value that is not one fails construction naming the row."""
 
@@ -43,6 +46,7 @@ class SiteProfile:
     service_ports: tuple[int, int] | None = None
     worker_ports: tuple[int, int] | None = None
     jobs_can_submit: bool = True
+    job_root: str | None = None
     services: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
@@ -106,6 +110,7 @@ SITES: Mapping[str, SiteProfile] = {
         # 8786 is the only login port open to batch nodes, and the task server holds it
         service_ports=None,
         worker_ports=(10000, 10100),
+        job_root="/afs",
     ),
     "generic": SiteProfile(
         name="generic",
@@ -117,6 +122,7 @@ SITES: Mapping[str, SiteProfile] = {
         driver_ports=(10000, 10100),
         service_ports=(10000, 10100),
         worker_ports=(10000, 10100),
+        job_root="/",  # the one-host pool
     ),
 }
 

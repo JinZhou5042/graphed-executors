@@ -5,6 +5,10 @@ HMAC-SHA256 of the body); a missing or wrong signature is answered 403 before an
 Routes: ``/hello`` registers a pilot, ``/next`` long-polls a task lease, ``/beat`` keeps the pilot's
 leases alive, ``/result`` settles a task's future.
 
+``/announce`` is the one plain-text route: a cluster-hosted service's job posts ``key host:port identity``,
+signed with a per-call announce secret (:meth:`TaskServer.announce_secret`) that is valid for that key
+only and signs no pickle, so a service job never holds the secret that runs code here.
+
 A task waits in PENDING until its future arguments are done, then queues. Its first lease moves it to
 RUNNING. A pilot silent for ``LEASE_S`` is lost: each task it held is re-queued once, and a second loss
 fails it with :class:`WorkerLost`. When no pilot is left and none can come, queued tasks fail too.
@@ -16,6 +20,7 @@ import hashlib
 import hmac
 import itertools
 import pickle
+import re
 import secrets
 import sys
 import threading
@@ -41,6 +46,7 @@ POLL_S = 10.0  # the /next long-poll bound
 
 SIG_HEADER = "X-Graphed-Sig"
 TASK_HEADER = "X-Graphed-Task"
+_HOSTPORT = re.compile(r".+:[0-9]+")
 
 
 class WorkerLost(Exception):
@@ -106,6 +112,10 @@ class TaskServer:
         self._beats: dict[str, float] = {}
         self._lost: set[str] = set()
         self._closed = False
+        # announces wait on their own condition: a notify meant for a leasing pilot is never taken here
+        self._announced = threading.Condition()
+        self._announce_secrets: dict[str, bytes] = {}
+        self._announces: dict[str, tuple[str, str]] = {}
         self._http = _bind(port_range)
         self._http.tasks = self
         self.url = f"http://{host}:{self._http.server_address[1]}"
@@ -170,6 +180,46 @@ class TaskServer:
     def shutdown(self) -> None:
         self._http.shutdown()
         self._http.server_close()
+
+    # ---- cluster-hosted services ----
+
+    def announce_secret(self, keys: list[str]) -> bytes:
+        """A fresh secret that signs ``/announce`` for ``keys`` only."""
+        secret = secrets.token_bytes(32)
+        with self._announced:
+            for key in keys:
+                self._announce_secrets[key] = secret
+        return secret
+
+    def forget_announce(self, keys: list[str]) -> None:
+        """Refuse ``keys``' announces from now on, and drop any record they left."""
+        with self._announced:
+            for key in keys:
+                self._announce_secrets.pop(key, None)
+                self._announces.pop(key, None)
+
+    def wait_announce(self, key: str, timeout: float) -> tuple[str, str] | None:
+        """``(host:port, identity)`` of ``key``'s announce, popped; ``None`` after ``timeout``."""
+        with self._announced:
+            self._announced.wait_for(lambda: key in self._announces, timeout)
+            return self._announces.pop(key, None)
+
+    def announce(self, body: bytes, sig: bytes) -> HTTPStatus:
+        """Record ``key host:port identity`` when ``sig`` verifies against ``key``'s announce secret."""
+        try:
+            fields = body.decode().split()
+        except UnicodeDecodeError:
+            return HTTPStatus.FORBIDDEN
+        with self._announced:
+            secret = self._announce_secrets.get(fields[0]) if fields else None
+            if secret is None or not hmac.compare_digest(sig, sign(secret, body).encode()):
+                return HTTPStatus.FORBIDDEN
+            if len(fields) != 3 or not _HOSTPORT.fullmatch(fields[1]):
+                return HTTPStatus.BAD_REQUEST
+            key, hostport, identity = fields
+            self._announces[key] = (hostport, identity)
+            self._announced.notify_all()
+        return HTTPStatus.OK
 
     # ---- pilot side, called from the request handlers ----
 
@@ -277,6 +327,9 @@ class _Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         # headers arrive latin-1 decoded; comparing bytes keeps a malformed one a plain mismatch
         sig = self.headers.get(SIG_HEADER, "").encode("latin-1")
+        if self.path == "/announce":  # text, verified by its own key's secret: never unpickled
+            self._reply(tasks.announce(body, sig))
+            return
         if not hmac.compare_digest(sig, sign(tasks.secret, body).encode()):
             self._reply(HTTPStatus.FORBIDDEN)
             return

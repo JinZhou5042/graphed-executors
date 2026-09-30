@@ -269,13 +269,15 @@ Where the pilots run depends on ``pilots=``:
   them together.
 * ``pilots="condor"`` has the driver job submit ``n_pilots`` pilot jobs of its own, to the schedd
   your session chose, and host its task server on one of the site's ``worker_ports`` (10000–10100
-  on every built-in site). On **lxplus** the pilots need a submit directory the schedd reads, so
-  ``log_dir`` must lie under ``/afs``; anything else is refused. A site without ``worker_ports`` refuses
-  ``pilots="condor"``.
+  on every built-in site). The pilots need a submit directory the schedd reads, so ``log_dir`` must
+  lie under the site's ``job_root`` (``SiteProfile.job_root``: ``/afs`` on **lxplus**, any path on
+  ``generic``); anything else is refused, and so is a site without a ``job_root`` or without
+  ``worker_ports``.
 
 The job brings back ``result.pkl`` and ``driver.log`` (the pilots' pids or the pilot cluster,
-timings, and any traceback); on the LPC and lxplus they are spooled and ``result()`` retrieves
-them into ``log_dir``. ``logs()`` returns the driver's log files that have come back. The job's
+timings, and any traceback); on the LPC and lxplus a single job is spooled and ``result()``
+retrieves them into ``log_dir`` (a run with service nodes is not spooled; see `Cluster-hosted
+services`_). ``logs()`` returns the driver's log files that have come back. The job's
 exit code decides whether HTCondor runs it again:
 
 .. list-table::
@@ -296,6 +298,13 @@ exit code decides whether HTCondor runs it again:
    * - 3
      - The plan's own code raised; it would raise again.
      - No
+   * - killed
+     - The driver died before writing its result: out of memory, a signal, no interpreter in the
+       image. The job's script writes a placeholder ``result.pkl`` and ``driver.log`` before Python
+       starts, so the job still completes (a job whose declared outputs are missing would be held).
+       If the last try dies too, ``result()`` raises ``RuntimeError: the driver exited before writing
+       a result; see driver.log``.
+     - Twice
 
 On a spooled site (the LPC, lxplus) the completed job stays in the queue after ``result()``, so
 call ``handle.remove()``; it also stops a job that is still running. ``wait()`` returns only on
@@ -323,10 +332,9 @@ It tries three places, in order:
    The ``lpc`` row names the Elastic Analysis Facility's inference server
    (``grpcs://triton.fnal.gov:443``); ``lxplus`` and ``generic`` host none. A site endpoint that
    fails its check is passed over, and the reason is kept.
-3. **One it starts**, from the spec's recipe, beside the driver when the recipe needs no image and
-   no GPU and the site lets workers reach the driver's host (``service_hosts``); it is stopped when
-   the run ends. A recipe that needs an image or a GPU needs cluster hosting, which this release does
-   not have yet, so such a run is refused naming ``host_service``.
+3. **One it starts**, from the spec's recipe: beside the driver when the recipe needs no image and
+   no GPU and the site lets workers reach the driver's host (``service_hosts``), else as a job of its
+   own on the pool (see `Cluster-hosted services`_). It is stopped when the run ends.
 
 ``graphed_executors.submit.recipes`` has two recipes as plain data: ``triton(name, image,
 model_repository)`` (gRPC only, one port) and ``http_server(name)`` (Python's ``http.server``).
@@ -363,8 +371,88 @@ server for several plans, start it yourself and pass its endpoints to the runner
 
 Each run logs how it satisfied every service on the ``graphed_executors.services`` logger (the
 record's ``status`` attribute is a ``ServiceStatus``: leg, endpoint, host, times). A driverless job
-resolves the services in the driver job, by the same three places, with the job's own site row; a
-service it cannot reach or start there exits 1, so HTCondor retries it.
+resolves the services in the driver job, by the same three places, with the job's own site row, and
+runs a service that needs an image or a GPU as a node of its DAG (below); a service it cannot reach
+or start exits 1, so HTCondor retries it.
+
+Cluster-hosted services
+~~~~~~~~~~~~~~~~~~~~~~~
+
+A recipe that needs an image or a GPU cannot run beside the driver, so the runner runs it as a job
+of its own on the pool, next to the pilots, for the length of the run. Every built-in site allows
+this (``"cluster"`` is in ``service_hosts`` wherever ``worker_ports`` is set). The job starts a small
+standard-library script (Python 3.9 or later, so it runs in an image with no venv) that takes the
+first free port of the site's ``worker_ports``, starts the recipe's command on it, runs the spec's
+check there, and then *announces* ``host:port`` to the runner's task server, signed with a secret
+made for that one service. The runner waits up to the spec's ``timeout_s`` for the announce. A job
+that ends or is held first raises ``RuntimeError`` naming its state and its directory
+``service-<key>/`` under ``log_dir``; a job that has not announced by then raises ``TimeoutError``;
+either way the job is removed. When the run ends the job is removed too, and leaves its slot (and its
+GPU) within 30 seconds. On a spooled site (the LPC, lxplus) a service job that completed has its
+``service.out`` and ``service.err`` fetched into ``service-<key>/`` when it is removed.
+
+Three things to know when you write or use a recipe:
+
+* **The command runs in a directory that holds exactly the recipe's** ``inputs``, each under its
+  basename (a directory keeps its tree). Nothing else from the job's scratch directory is there —
+  not your credentials, not the job's own files — so a recipe names its inputs by basename. Pass
+  ``triton(..., model_repository="models")`` for a ``models/`` directory in the directory you submit
+  from, never a path such as ``data/models``. Inputs are found relative to where you submit from; one
+  that is missing, two that share a basename, and one that is or holds a symlink to a directory are
+  refused before anything is submitted.
+* **A custom recipe's server must bind with** ``SO_REUSEADDR``. A port counts as free when a bind
+  with ``SO_REUSEADDR`` succeeds, so a server that binds without it can fail on a port that holds
+  only a ``TIME_WAIT``; the job then exits instead of trying the next port. ``http.server`` and gRPC
+  servers (Triton among them) already set it.
+* **In** ``argv``, ``{python}`` is the job's interpreter (the shipped venv's, or ``python3`` in an
+  image), ``{port}`` the chosen port and ``{host}`` the node's name.
+
+**In a driverless run.** A driver job does not submit service jobs itself. When a plan has a service
+that needs an image or a GPU, and neither ``services=`` nor the site's row serves it,
+``submit_driverless`` submits a DAG instead of one job: a ``driver`` node, which is the job described
+in `Running without a login session`_, and one ``SERVICE`` node per such service, named ``svc0``,
+``svc1``, … in the order of the services' names. The driver writes its URL and a secret made for
+the announces into the run directory; each service node announces to whichever try of the driver is
+running, so a retried driver finds the same service again. DAGMan removes the service nodes when the
+DAG ends. Each such run gets a new directory, ``<log_dir>/graphed-<nonce>/``, which is the handle's
+``log_dir``: ``result.pkl``, ``driver.log``, the node files and DAGMan's ``run.dag.dagman.out`` are
+there. ``status()`` reports the driver node (``held`` while it is held), and the outcome is the last
+try's exit; a DAG whose driver never returned a result raises ``RuntimeError`` naming
+``run.dag.dagman.out``.
+
+The DAG is not spooled: the schedd and the nodes read the run directory, your ``user_modules`` and
+the services' inputs where they lie, so all of them must lie under the site's ``job_root``
+(``SiteProfile.job_root``: ``/afs`` on lxplus, any path on ``generic``). Anything outside is
+refused before anything is submitted. The LPC has no ``job_root``, so a driverless LPC run refuses a
+service that would need a node; the inference server its row names still serves that kind (leg 2).
+The check reads the path as written, not where a symlink points: an input under the root that is a
+symlink to a file outside it passes, and if the schedd cannot read that file the node is held. A held
+service node is removed (its ``periodic_remove``); each try of the driver then waits ``timeout_s``
+for its announce, so the run fails after three × ``timeout_s``, as it does for a service node that
+starts but never announces. A held driver node stays ``held`` until you release or remove it.
+
+**On lxplus, with a GPU.** An inference server for your ONNX models in ``models/`` (Triton's layout),
+reached from CPU pilots:
+
+.. code-block:: python
+
+    # A recipe: this needs lxplus, from a directory under /afs that holds models/.
+    import os
+    from graphed_executors.htcondor_backend import htcondor_runner, submit_driverless
+    from graphed_executors.submit import recipes
+
+    triton = recipes.triton(
+        "triton",
+        image="/cvmfs/unpacked.cern.ch/nvcr.io/nvidia/tritonserver:24.11-py3",
+        model_repository="models",               # a basename: the server runs where its inputs land
+    )
+    # the analysis declares it as a service its nodes call; with the plan built:
+    with htcondor_runner(site="lxplus", n_pilots=2, image=IMAGE,
+                         extra_submit={"+JobFlavour": '"espresso"'}) as runner:
+        result = runner.run(plan)                # the server runs as a GPU job beside the pilots
+
+    handle = submit_driverless(plan, site="lxplus", image=IMAGE, n_pilots=2,
+                               request_memory_mb=4000, log_dir=os.getcwd())   # one SERVICE node
 
 
 The arguments you will change
@@ -403,6 +491,31 @@ The arguments you will change
      - How many pilots must be connected before the first run starts; 1 by default.
    * - ``retries``
      - Has no effect here. The only retry is the one re-run of a task whose pilot was lost.
+
+
+Temporary space on the worker
+-----------------------------
+
+No code in graphed-executors names ``/tmp`` or ``/var/tmp``. A pilot or driver job unpacks its venv
+and writes its logs in its working directory, which is the job's scratch directory, and anything
+made with Python's ``tempfile`` goes to ``TMPDIR``.
+
+**On the LPC** the scratch directory is ``/srv`` inside the container, on the node's local disk, and
+``TMPDIR``, ``TMP`` and ``TEMP`` point at it; a submit ``environment`` does not move ``TMPDIR``. ``/tmp``
+and ``/var/tmp`` share one 64 MiB ``tmpfs`` made by the site's container wrapper, so a tool that
+writes to either itself runs out of space at 64 MiB between them (September 2026, ``graphed-workdir/lanes/htcondor/probes/site-lpc/m68b-tmpenv.txt`` and
+``m68b-proxy-scratch.txt``). Point such a tool at the scratch directory with its own variable, and
+ask for the space with `request_disk
+<https://htcondor.readthedocs.io/en/latest/man-pages/htcondor-jdl.html#request_disk>`__:
+
+.. code-block:: python
+
+    extra_submit = {"environment": '"MYTOOL_TMP=/srv"', "request_disk": "20G"}
+
+Pass it to ``htcondor_runner`` or ``submit_driverless``. The submit ``environment`` reaches the job
+and ``extra_submit`` is applied after graphed-executors' own keys, none of which is
+``environment``. ``submit_driverless`` gives them to every job of the run: the driver job, the
+pilot jobs it submits and any service nodes.
 
 
 When something goes wrong

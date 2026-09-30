@@ -866,8 +866,13 @@ local schedd. Nothing about the run changes but where the driver lives, so the a
 bit for bit. The plan is pickled, not written as a ``DurablePlan``: no executor accepts that, and
 the job needs the plan's functions, which the pickle names. The exit code says who fails the run: a
 plan error (3) is deterministic and ends HTCondor's retries; anything else (1), lost workers
-included, is retried. A ``RunHandle`` is five fields of JSON, so another session can pick the run
-up.
+included, is retried. A driver killed before it writes its result is retried too: the job's script
+writes a placeholder result before Python starts, because HTCondor holds a job whose declared outputs
+are missing. A plan with a service that needs an image or a GPU goes as a DAG instead: that job as
+its ``driver`` node beside one ``SERVICE`` node per such service, each announcing to whichever try of
+the driver is running. The run's outcome is the driver node's last try, never DAGMan's own exit,
+which depends on how strictly the site's DAGMan treats service nodes still idle or held at the end.
+A ``RunHandle`` is a few fields of JSON, so another session can pick the run up.
 
 **Services: an analysis names them, a run finds them.** A plan's ``services`` are requirements
 (graphed ``ServiceSpec``: a name, a kind, a readiness check, optionally a launch recipe); the endpoint
@@ -881,8 +886,10 @@ task and the value is resolved while the services are still up. A run's services
 its queued tasks live exactly as long as the run: every acquisition registers its release when it
 returns, and each release logs its failure instead of raising, so the error you see is the first one.
 The engine names no service; the recipes are plain data in ``graphed_executors.submit.recipes``.
-Cluster hosting is one duck-typed seam, a backend's ``host_service``/``release_service`` pair, that a
-later release fills.
+Cluster hosting is one duck-typed seam, a backend's ``host_service``/``release_service`` pair. The
+HTCondor backend fills it with a job per service that announces its endpoint, signed with a secret
+made for that one service (never the pilots' secret, which signs pickles), from a directory that holds
+only the recipe's inputs.
 
 Not supported yet
 -----------------

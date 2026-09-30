@@ -37,6 +37,8 @@ jobs:
   test:
     name: test ${{ matrix.os }} py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    # Twice the slowest leg: a wedged interpreter must fail here, not at GitHub's 6 h limit.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -72,7 +74,7 @@ jobs:
       - name: Lint + types (pre-commit hooks via prek)
         run: uvx prek@0.4.5 run --all-files --show-diff-on-failure
       - name: Pytest (frozen + extra) + whole-package coverage (>=90%)
-        run: pytest tests/frozen tests/extra --cov=graphed_executors --cov-branch --cov-report=term-missing
+        run: pytest tests/frozen tests/extra -o faulthandler_timeout=300 --cov=graphed_executors --cov-branch --cov-report=term-missing
       - name: Per-file coverage gate (>=90% each)
         shell: bash
         run: |
@@ -100,6 +102,8 @@ jobs:
     name: test (experimental) py${{ matrix.python }}
     runs-on: ubuntu-latest
     continue-on-error: true
+    # The leg takes ~9 min; a wedged interpreter must fail here, not at GitHub's 6 h limit.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -115,7 +119,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "${{ env.GRAPHED }}" "${{ env.CORPUS }}" "${{ env.HISTOGRAM }}"
           python -m pip install -e ".[dev]"
-          pytest tests/frozen
+          pytest tests/frozen -o faulthandler_timeout=300
 
   # The dask.distributed backend (graphed_executors.dask_backend) lives behind the [dask] extra and
   # importorskips out of the main matrix. This dedicated job installs it and runs the m42 dask suite
@@ -304,14 +308,24 @@ jobs:
           # jobs share the host /tmp (default: a private one), so a driver job's FS-auth file and its
           # pilots' initialdir under pytest's tmp_path are visible to the schedd, as on a shared-FS site
           echo "MOUNT_UNDER_SCRATCH =" | sudo tee /etc/condor/config.d/99-jobs-share-tmp
+          # one simulated GPU (no device), so a GPU recipe matches a slot (m68b)
+          printf '%s\n' 'use feature : GPUs' 'GPU_DISCOVERY_EXTRA = $(GPU_DISCOVERY_EXTRA) -simulate:2,1' \
+            | sudo tee /etc/condor/config.d/99-sim-gpu
           sudo systemctl enable --now condor || sudo condor_master
           for i in $(seq 90); do
             condor_status -schedd -af Name 2>/dev/null | grep -q . && condor_status -af Name 2>/dev/null | grep -q . && break
             sleep 2
           done
+          # the installer already started the pool, so the startd sees the simulated GPU only once restarted
+          sudo condor_restart -daemon startd
+          for i in $(seq 90); do
+            condor_status -af TotalGPUs 2>/dev/null | grep '^[1-9]' >/dev/null && break
+            sleep 2
+          done
           condor_version
           condor_status -schedd -af Name | grep .
-          condor_status -af Name State Cpus Memory
+          condor_status -af Name State Cpus Memory TotalGPUs
+          condor_status -af TotalGPUs | grep '^[1-9]'  # the live DAG legs need that GPU
       - name: Install deps + this package with the htcondor extra
         shell: bash
         run: |
@@ -338,7 +352,7 @@ jobs:
               time.sleep(5)
           print("Triton ready on grpc://localhost:8001")
           PY
-      - name: Pytest frozen m66 + m67 + m68a on the pool + scoped coverage gate (>=90%)
+      - name: Pytest frozen m66 + m67 + m68a + m68b on the pool + scoped coverage gate (>=90%)
         # a bare `--cov` keeps the rcfile's source; a path-valued one overrides it (see test-parsl)
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/.coveragerc-htcondor
@@ -348,7 +362,7 @@ jobs:
         run: |
           python -c "import sysconfig, pathlib; pathlib.Path(sysconfig.get_path('purelib'), 'graphed_subcov.pth').write_text('import coverage; coverage.process_startup()\n')"
           pytest tests/frozen/m66 tests/extra/m66 tests/frozen/m67 tests/extra/m67 \
-            tests/frozen/m68a tests/extra/m68a \
+            tests/frozen/m68a tests/extra/m68a tests/frozen/m68b tests/extra/m68b \
             --cov --cov-config=.coveragerc-htcondor \
             --cov-branch --cov-fail-under=0
           mv .coverage .coverage.driver

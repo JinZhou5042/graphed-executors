@@ -16,15 +16,14 @@ from __future__ import annotations
 
 import importlib
 import json
-import multiprocessing
 import os
 import shutil
 import sys
 import sysconfig
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -68,15 +67,23 @@ DRIVER_MODULE = "graphed_executors.htcondor_backend.driver"
 
 
 def run_bounded(fn: Callable[[], Any], timeout_s: float = RUN_TIMEOUT_S) -> Any:
-    """Run ``fn`` on a daemon worker thread and fail if it does not finish in ``timeout_s``: a hang is a
+    """Run ``fn`` on a daemon thread and fail if it does not finish in ``timeout_s``: a hang is a
     failure, never a wedged CI job. Returns the value or re-raises the call's exception."""
-    pool = ThreadPool(1)  # daemon workers: a hung call cannot block interpreter exit
-    try:
-        return pool.apply_async(fn).get(timeout_s)
-    except multiprocessing.TimeoutError:
-        raise AssertionError(f"HARD TIMEOUT: call did not finish within {timeout_s}s") from None
-    finally:
-        pool.close()  # never join: the worker may still be hung
+    out: dict[str, Any] = {}
+
+    def _drive() -> None:
+        try:
+            out["result"] = fn()
+        except BaseException as exc:
+            out["error"] = exc
+
+    thread = threading.Thread(target=_drive, daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    assert not thread.is_alive(), f"HARD TIMEOUT: call did not finish within {timeout_s}s"
+    if "error" in out:
+        raise out["error"]
+    return out["result"]
 
 
 def wait_for(predicate: Callable[[], bool], timeout_s: float = 30.0) -> None:

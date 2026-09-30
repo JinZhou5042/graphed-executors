@@ -38,6 +38,23 @@ Services a plan calls
   load error and ``driver.log``.
 * The runners that resolve no services (the local executors, the peer reductions) refuse a plan
   whose services are unbound before running any task.
+* A service whose recipe needs an image or a GPU runs as a job of its own on an HTCondor pool, beside
+  the pilots: it announces its endpoint to the runner, is checked like any other, and is removed when
+  the run ends. Its command runs in a directory that holds exactly the recipe's inputs, so a recipe
+  names its inputs by basename (``triton(..., model_repository="models")``). See :doc:`htcondor`.
+* ``submit_driverless`` runs such a plan as a DAG: the driver plus one ``SERVICE`` node per service,
+  in a new ``<log_dir>/graphed-<nonce>/`` per run (the handle's ``log_dir``). ``SiteProfile`` gains
+  ``job_root``, the tree a site's jobs read directly (``/afs`` on lxplus, any path on ``generic``,
+  none on the LPC): a DAG's directory, ``user_modules`` and service inputs must lie under it, and
+  ``pilots="condor"`` now reads it too, so a site row without one refuses self-submission.
+  ``RunHandle`` gains ``dag``; a handle saved before loads as before. A ``user_modules`` path holding
+  ``,`` is refused, since it would split the job's input list.
+* A driverless run's ``extra_submit`` reaches the pilot jobs its driver job submits
+  (``pilots="condor"``) as well as the driver job and its service nodes, as ``htcondor_runner``'s
+  reaches its pilots.
+* A driverless driver killed before it writes a result (out of memory, a signal, no interpreter) is
+  retried like exit 1 instead of being held; after the last try ``result()`` raises ``RuntimeError:
+  the driver exited before writing a result; see driver.log``.
 * This needs ``graphed.services``, which no graphed release has yet (0.0.6 does not): CI installs
   graphed from git, and graphed-executors will not be released until its ``graphed`` floor moves to
   the release carrying the service surface and its resolve walk.
