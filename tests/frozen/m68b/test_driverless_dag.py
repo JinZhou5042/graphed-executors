@@ -232,7 +232,7 @@ def test_service_nodes_are_named_by_derived_ids_in_name_order(
 
     (call,) = logged(fake.log, "from_dag")
     assert os.path.isabs(call[1]) and Path(call[1]) == run_dir / "run.dag", call
-    assert call[2] == DAG_OPTIONS, call
+    assert call[2] == {**DAG_OPTIONS, "dagman": "/usr/bin/condor_dagman"}, call
     (entry,) = logged(fake.log, "submit")
     assert entry[1] == {"dag_file": call[1]} and entry[3] is False, entry
 
@@ -255,7 +255,7 @@ def test_an_lxplus_service_node_keeps_its_credential_and_env_and_the_dag_is_not_
     assert job_attr(read_sub(run_dir / "svc0.sub"), "SendCredential") == "True"
     assert os.path.isfile(run_dir / "service-svc0" / "env.tgz"), "the node's env.tgz link does not resolve"
     (call,) = logged(fake.log, "from_dag")
-    assert Path(call[1]) == run_dir / "run.dag" and call[2] == DAG_OPTIONS, call
+    assert Path(call[1]) == run_dir / "run.dag" and call[2] == {**DAG_OPTIONS, "dagman": "/usr/bin/condor_dagman"}, call
     (entry,) = logged(fake.log, "submit")
     assert entry[3] is False and logged(fake.log, "spool") == [], fake.log
 
@@ -572,7 +572,7 @@ def test_a_finished_dag_takes_its_outcome_from_the_latest_driver_try(
     record_bindings(monkeypatch, schedd)
     assert run_bounded(dag_handle(tmp_path).status) == expected
     node_history = [e for e in logged(schedd.log, "history") if is_node_constraint(e[1])]
-    assert node_history and all(names_the_driver_node(e[1]) and e[3] == 3 for e in node_history), node_history
+    assert node_history and all(names_the_driver_node(e[1]) and e[3] == 1 for e in node_history), node_history
     assert_no_dag_counters(schedd.log)
 
 

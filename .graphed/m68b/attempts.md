@@ -182,3 +182,19 @@ confirmed r25; B2 converged r19/r20); implementer constraints `plan/reviews/m68b
   bindings/`condor_dagman` legs). Container (m67 + m68b frozen and extras, simulated GPU, bytecode cleared):
   180 passed, 0 failed; `driver.py` 100%, `driverless.py` 99% on that scope; diff-cover 100% of 519 lines. ruff,
   format, mypy (+win32), sphinx -W, precommit `--fast --no-coverage`: ok.
+
+## lxplus submit fixes (branch fix/htcondor-lxplus-submit, base db8fb0a)
+- D1 93554d3: a driverless DAG runs the schedd's `condor_dagman` (`from_dag` option `dagman=<schedd BIN>/condor_dagman`);
+  attempt 1 on lxplus held DAGMan at once on the image's `/usr/local/bin/condor_dagman`.
+- D2 4da13a3: `launch.ensure_credential` stores the Kerberos credential before a `SendCredential` submit and, when
+  storing fails, raises a RuntimeError naming `<producer> | condor_store_cred add-krb -i -`.
+- Owner-sanctioned refreezes: ee1a297 (harness fakes gain `Credd`/`RemoteParam`; the `DAG_OPTIONS` pins name the
+  dagman option; tags freeze-m67-fixup2, freeze-m68b-fixup2) and 1c49028 (D3 ruling: frozen pin `e[3] == 1`;
+  freeze-m68b-fixup2 moved there).
+- D3 76e672b: `RunHandle._dag_status` reads the driver node's history with `match=1`; attempt 2 measured
+  `match=3` never returning on bigbird26 after a first-try success (whole-history scan).
+- lxplus evidence (lanes/htcondor/probes/site-lxplus/m68b-dag.txt): attempt 1 (db8fb0a, D1 hold), attempt 2
+  (ee1a297: D1/D2 fixed, D3 found), attempt 3 (D3 product on this branch).
+- Gates at 76e672b: precommit `--fast --no-coverage` ok; macOS frozen+extra m66/m67/m68b 244 passed, 6 skipped;
+  minicondor container (m68b-minicondor:local) m66/m67/m68a/m68b frozen+extra: 441 collected, 3 skipped, 0 failed;
+  every htcondor-scope file >= 97.92% (backend.py lowest); diff-cover vs db8fb0a 100% (17 lines).

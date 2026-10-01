@@ -56,6 +56,26 @@ def _htcondor() -> Any:
     return htcondor2
 
 
+STORE_CREDENTIAL = "$(condor_config_val SEC_CREDENTIAL_PRODUCER) | condor_store_cred add-krb -i -"
+
+
+def ensure_credential(htc: Any, desc: Mapping[str, str]) -> None:
+    """Store the submitter's Kerberos credential, as ``condor_submit`` does and ``schedd.submit`` does not,
+    when ``desc`` sends one and the credd holds none: such a job never starts."""
+    if str(desc.get("MY.SendCredential", "")).lower() != "true":
+        return
+    # asked first: issue_credentials fails where the producer is missing (an image), stored or not
+    if htc.Credd().query_user_cred(htc.CredType.Kerberos) is not None:
+        return
+    try:
+        htc.Submit(dict(desc)).issue_credentials()
+    except Exception as exc:
+        raise RuntimeError(
+            f"the credd holds no Kerberos credential of yours and storing one here failed ({exc}); "
+            f"run on the login host, outside any container: {STORE_CREDENTIAL}"
+        ) from exc
+
+
 def write_secret(path: Path, secret: bytes) -> None:
     path.touch(mode=0o600)
     path.chmod(0o600)  # touch keeps an existing file's mode
@@ -259,6 +279,9 @@ class CondorPilots:
     def _submit(self, htc: Any, schedd: Any, desc: Mapping[str, str], n: int, stack: ExitStack) -> Any:
         """Submit ``n`` jobs of ``desc``, spooling their sandbox where the site needs it. The cluster's
         removal goes on ``stack`` as soon as ``schedd.submit`` returns, so a failed spool leaves none."""
+        # schedd_locate is a job's case: no local credd to ask, and the running job keeps one stored
+        if self.schedd_locate is None:
+            ensure_credential(htc, desc)
         result = schedd.submit(htc.Submit(dict(desc)), count=n, spool=self.profile.spool)
         constraint = f"ClusterId == {int(result.cluster())}"
         stack.callback(release_quietly, f"cluster {constraint}", self._remove, htc, schedd, constraint)

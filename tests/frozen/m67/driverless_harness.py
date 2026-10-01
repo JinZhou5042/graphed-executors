@@ -319,6 +319,13 @@ class _Collector:
         return list(self.fake.schedd_ads)
 
 
+class _Credd:
+    """A credd that holds the user's Kerberos credential, so a submit stores none."""
+
+    def query_user_cred(self, *args: Any, **kwargs: Any) -> int:
+        return 1790802437
+
+
 class FakeHTCondor:
     """What ``launch._htcondor()`` returns under the recorder: ``param``, ``Collector``, ``Schedd``,
     ``Submit`` and the enums the backend names. ``Schedd()`` with no location is logged as
@@ -350,6 +357,12 @@ class FakeHTCondor:
                 "TotalIdleJobs": 1,
             }
         ]
+
+    class CredType:
+        Kerberos = "Kerberos"
+
+    def Credd(self, *args: Any, **kwargs: Any) -> _Credd:
+        return _Credd()
 
     def Collector(self, pool: str | None = None, *args: Any, **kwargs: Any) -> _Collector:
         self.log.append(("Collector", pool))

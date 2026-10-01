@@ -86,3 +86,13 @@ Baseline at 613aaa7 (`pytest tests/frozen tests/extra`, macOS py3.12): 711 passe
 - Gates: `pytest tests/frozen tests/extra` 766 passed, 11 skipped. test-htcondor replica 119 passed; per file:
   `__init__`/driver/driverless/pilot/sites 100%, backend 95%, launch 95%, server 99%; coverage_gate ok.
   diff-cover vs origin/main eefc0f3: 239 lines, 0 missing, 100%. Sphinx -W, mypy, precommit ok.
+
+## lxplus submit fixes (branch fix/htcondor-lxplus-submit, base db8fb0a)
+- D2 4da13a3: `launch.ensure_credential` stores the Kerberos credential before a `SendCredential` submit (a credd
+  without one left the job looping ReconnectFailed with NumJobStarts 0 on bigbird26) and names the store command
+  when storing fails. D1 93554d3 and D3 76e672b are m68b's (see its attempts.md).
+- Owner-sanctioned refreeze ee1a297: the m67 harness fake gains `Credd`; tag freeze-m67-fixup2.
+- lxplus evidence: lanes/htcondor/probes/site-lxplus/m68b-dag.txt attempts 1-3; D2 probes in
+  probes/site-lxplus/submit-fixes/.
+- Gates at 76e672b: precommit ok; macOS frozen+extra m66/m67/m68b 244 passed, 6 skipped; container m66/m67/m68a/m68b
+  441 collected, 3 skipped, 0 failed; per-file >= 97.92%; diff-cover 100% (17 lines).

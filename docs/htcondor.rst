@@ -188,6 +188,13 @@ live 105 s after submission on the run this is measured from
 10000 run is ``pilot-logs-run2.txt`` next to it). The lxplus schedd refuses a spooled job that
 brings nothing back, which the site handles with ``transfer_output_files=""``.
 
+lxplus jobs carry your Kerberos credential (``SendCredential``) from the credd, which drops it an
+hour after your last job leaves the queue (``SEC_CREDENTIAL_SWEEP_DELAY``); a job submitted while
+it holds none never starts. So a submit that finds none stores one first, as ``condor_submit`` does.
+Inside the image that fails, since CERN's credential producer is not in it, with a ``RuntimeError``
+naming the command to run on the login node before you try again:
+``$(condor_config_val SEC_CREDENTIAL_PRODUCER) | condor_store_cred add-krb -i -``.
+
 Pilots run in the ``longlunch`` queue (two hours); pass
 ``extra_submit={"+JobFlavour": '"workday"'}`` for a longer run, or
 ``extra_submit={"output_destination": "root://eosuser.cern.ch//eos/user/..."}`` to have the logs

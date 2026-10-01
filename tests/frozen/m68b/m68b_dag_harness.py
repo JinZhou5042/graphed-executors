@@ -350,6 +350,13 @@ class _SubmitType:
         return FakeSubmit({"dag_file": str(filename)})
 
 
+class _Credd:
+    """A credd that holds the user's Kerberos credential, so a submit stores none."""
+
+    def query_user_cred(self, *args: Any, **kwargs: Any) -> int:
+        return 1790802437
+
+
 class FakeHTCondor:
     """What ``launch._htcondor()`` returns under the recorder: ``param``, ``Collector``, ``Schedd``,
     ``Submit`` and the enums the backend names."""
@@ -374,6 +381,16 @@ class FakeHTCondor:
             "FERMIHTC_REMOTE_POOL": FAKE_POOL,
             "FULL_HOSTNAME": "login.m68b.example",
         }
+
+    class CredType:
+        Kerberos = "Kerberos"
+
+    def Credd(self, *args: Any, **kwargs: Any) -> _Credd:
+        return _Credd()
+
+    def RemoteParam(self, location: Any) -> dict[str, str]:
+        """The located schedd's config: the CI pool's RPM layout."""
+        return {"BIN": "/usr/bin"}
 
     def Collector(self, pool: str | None = None, *args: Any, **kwargs: Any) -> _Collector:
         self.log.append(("Collector", pool))

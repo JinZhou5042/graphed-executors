@@ -103,7 +103,8 @@ class RunHandle:
                 return "held"
             return "running" if any(ad.get("JobStatus") == 2 for ad in ads) else "queued"
         if status == 4:
-            tries = list(schedd.history(node, ["ClusterId", "ExitCode"], match=3))
+            # newest first: the first driver ad is the latest try, and a bound past the tries scans all history
+            tries = list(schedd.history(node, ["ClusterId", "ExitCode"], match=1))
             latest: Mapping[str, Any] = max(tries, key=lambda ad: int(ad["ClusterId"]), default={})
             return "done" if latest.get("ExitCode") == 0 else "failed"
         return "running"
@@ -355,7 +356,11 @@ def submit_driverless(
         lines.append("RETRY driver 2 UNLESS-EXIT 3")
         (run_dir / DAG_FILE).write_text("\n".join(lines) + "\n")
         # never spooled: the run dir lies under job_root, which the schedd reads
-        result = schedd.submit(htc.Submit.from_dag(str(run_dir / DAG_FILE), DAG_OPTIONS))
+        # from_dag names the condor_dagman on this host's PATH; the scheduler universe runs the schedd's
+        bindir = htc.RemoteParam(htc.Collector().locate(htc.DaemonType.Schedd, name))["BIN"]
+        options = {**DAG_OPTIONS, "dagman": f"{bindir}/condor_dagman"}
+        launch.ensure_credential(htc, desc)  # the DAG's own description sends none; its nodes do
+        result = schedd.submit(htc.Submit.from_dag(str(run_dir / DAG_FILE), options))
     return RunHandle(
         site=site,
         schedd=name,
