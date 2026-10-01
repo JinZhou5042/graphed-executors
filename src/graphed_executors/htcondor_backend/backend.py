@@ -25,9 +25,10 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, overload
 
 from graphed.core.execution import ExecResult, Plan
+from graphed.core.plan import DurablePlanV2
 from graphed.services import ServiceSpec
 
 from graphed_executors.parsl_backend.backend import _ParslFuture
@@ -266,8 +267,18 @@ def _require_importable(obj: object, role: str) -> None:
         ) from exc
 
 
+def _require_plan_importable(plan: Plan[Any] | DurablePlanV2, roles: Sequence[str]) -> None:
+    """Refuse ``plan`` when a pilot could not import one of the V1 ``roles`` the caller ships; a
+    ``DurablePlanV2``'s stage processes travel by value, so pilots need not import them."""
+    if isinstance(plan, DurablePlanV2):
+        return
+    for role in roles:
+        if (part := getattr(plan, role)) is not None:
+            _require_importable(part, role)
+
+
 class HTCondorRunner(SubmitRunner):
-    """A :class:`SubmitRunner` that refuses a plan pilots cannot import, and waits for ``min_pilots``
+    """A :class:`SubmitRunner` that refuses a ``Plan`` pilots cannot import, and waits for ``min_pilots``
     before its first run so pilots that never start are an error instead of a queue that never drains."""
 
     backend: HTCondorBackend
@@ -294,9 +305,12 @@ class HTCondorRunner(SubmitRunner):
         self._waited = True
         return live
 
-    def run(self, plan: Plan[R]) -> ExecResult[R]:
-        _require_importable(plan.process, "process")
-        _require_importable(plan.combine, "combine")
+    @overload
+    def run(self, plan: Plan[R]) -> ExecResult[R]: ...
+    @overload
+    def run(self, plan: DurablePlanV2) -> ExecResult[Any]: ...
+    def run(self, plan: Plan[R] | DurablePlanV2) -> ExecResult[R] | ExecResult[Any]:
+        _require_plan_importable(plan, ("process", "combine"))
         if not self._waited:
             self.wait_for_pilots()
         return super().run(plan)

@@ -26,6 +26,15 @@ What does not work yet, and what to do instead.
   a ``graphed.core.DurablePlan`` and drive it with ``run_resumable`` where surviving a crash
   matters more than wall time.
 
+- **A join or repartition plan runs one map task per source partition.** ``SubmitRunner`` runs a
+  ``graphed.join_plan``/``shuffle_plan`` (:ref:`design-join-plan`) with no producer coalescing,
+  spill, byte budget or broadcast join; those stay with the block engines (``run_join``,
+  ``run_repartition``). The upgrade path is to route its map tasks through the engines' producer
+  coalescing. The local executors (``ThreadExecutor`` and the process executors) and the peer
+  reductions (``transport_run_plan``, ``parsl_run_plan``) refuse such a plan with a ``TypeError``
+  naming ``SubmitRunner``; run it with ``SubmitRunner(ThreadBackend())``, ``dask_runner``,
+  ``parsl_runner`` or ``htcondor_runner``.
+
 - **No TLS on graphed's own exchange plane on parsl.** ``shuffle_method="transport"`` on a
   parsl pool moves blocks over HTTP endpoints graphed mints in-task, and parsl's
   ``encrypted=True`` protects parsl's own channels, not those. Use it on a trusted cluster

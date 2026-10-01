@@ -55,6 +55,12 @@ Services a plan calls
 * A driverless driver killed before it writes a result (out of memory, a signal, no interpreter) is
   retried like exit 1 instead of being held; after the last try ``result()`` raises ``RuntimeError:
   the driver exited before writing a result; see driver.log``.
+* ``SubmitRunner`` (so ``dask_runner``, ``parsl_runner`` and ``htcondor_runner``, and
+  ``submit_driverless`` through its driver) runs a join or repartition plan (graphed's ``join_plan``
+  / ``shuffle_plan``, a ``DurablePlanV2``) stage by stage, with its services, so a service call can
+  come before the join. The local executors and the peer reductions refuse one with a ``TypeError``
+  naming ``SubmitRunner``. Its stage functions travel by value, so on HTCondor too (``htcondor_runner``,
+  ``submit_driverless``) they may be lambdas or live in ``__main__``. See :ref:`design-join-plan`.
 * This needs ``graphed.services``, which no graphed release has yet (0.0.6 does not): CI installs
   graphed from git, and graphed-executors will not be released until its ``graphed`` floor moves to
   the release carrying the service surface and its resolve walk.

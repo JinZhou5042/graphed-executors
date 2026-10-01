@@ -553,6 +553,103 @@ adds a target block size for when your key distribution is skewed. The relationa
 ``run_join``, is implemented in the same module but is not currently re-exported from
 ``graphed_executors.local``; import it from ``graphed_executors.local.shuffle`` until it is.
 
+.. _design-join-plan:
+
+Running a join or repartition plan
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The engines above take blocks you already hold. A join or repartition you recorded in graphed is
+a plan instead (``graphed.join_plan`` / ``graphed.shuffle_plan``, a ``DurablePlanV2``): map stages
+that read your sources and evaluate everything up to the exchange, gather stages that join or
+collect each destination and evaluate what you recorded after it, and optionally a one-task fold.
+``SubmitRunner`` runs one on any backend (``dask_runner``, ``parsl_runner`` and ``htcondor_runner``
+included), with the plan's services resolved and bound as for any plan, so a service call can come
+before the join. Functions the plan cannot import go to the workers by value, so they may be
+lambdas or live in ``__main__``, on HTCondor pilots (``htcondor_runner``, ``submit_driverless``) as
+on any backend. With the call in ``sf_client.py``:
+
+.. code-block:: python
+
+   import urllib.request
+
+   import awkward as ak
+   from graphed.preserve import ExternalPlugin, sha256_bytes
+
+
+   def scale(resource, params, inputs):  # params["url"] is the endpoint the run binds
+       with urllib.request.urlopen(params["url"] + "/sf") as resp:
+           factor = float(resp.read())
+       return ak.with_field(inputs[0], inputs[0].MET_pt * factor, "MET_pt")
+
+
+   def samples():
+       return [b"sf-v1", b"sf-v2"]
+
+
+   SF = ExternalPlugin(kind="sf", content_hash=sha256_bytes, evaluate=scale, samples=samples)
+
+and a stand-in server answering ``2``:
+
+.. code-block:: python
+
+   import tempfile
+   import threading
+   from http.server import BaseHTTPRequestHandler, HTTPServer
+
+   import awkward as ak
+   from graphed import Session, join, join_plan
+   from graphed.awkward import AwkwardBackend, from_parquet
+   from graphed.preserve import record_external
+   from graphed.services import ServiceSpec
+   from graphed_executors.submit import SubmitRunner, ThreadBackend
+
+   from sf_client import SF
+
+
+   class Answer2(BaseHTTPRequestHandler):
+       def do_GET(self):
+           self.send_response(200)
+           self.end_headers()
+           self.wfile.write(b"2")
+
+       def log_message(self, *args):
+           pass
+
+
+   server = HTTPServer(("127.0.0.1", 0), Answer2)
+   threading.Thread(target=server.serve_forever, daemon=True).start()
+
+   root = tempfile.mkdtemp()
+   ak.to_parquet(ak.Array({"run": [1, 1, 2], "MET_pt": [10.0, 20.0, 30.0]}), f"{root}/events.parquet")
+   ak.to_parquet(ak.Array({"run": [1, 2], "lumi_w": [0.9, 1.1]}), f"{root}/lumi.parquet")
+
+   s = Session(AwkwardBackend())
+   s.declare_service(ServiceSpec("sf", "http", check="http:/"))
+   events = from_parquet(s, "events", f"{root}/events.parquet")
+   lumi = from_parquet(s, "lumi", f"{root}/lumi.parquet")
+   scaled = record_external(s, SF, b"sf-v1", [events], params={"service": "sf"})
+   joined = join(scaled, lumi, on=["run"], how="inner")
+   plan = join_plan(joined.MET_pt * joined.lumi_w)
+
+   endpoint = f"http://127.0.0.1:{server.server_port}"
+   with SubmitRunner(ThreadBackend(2), services={"sf": endpoint}) as runner:
+       result = runner.run(plan)
+   print([(st.kind, len(st.tasks)) for st in plan.stages])
+   print(result.value)
+   server.shutdown()
+
+.. code-block:: text
+
+   [('map_write', 1), ('map_write', 1), ('gather_join', 1)]
+   (<Array [18, 36, 66] type='3 * float64'>,)
+
+Each stage goes out once the stages it reads have finished. A map task's output reaches each
+gather as that gather's slice alone: where the backend moves data between workers (dask,
+``ThreadBackend``) a small pick task beside the map cuts it, and where it does not (parsl HTEX,
+HTCondor) the driver fetches each map result once and cuts it there. The local executors and the
+peer reductions (``transport_run_plan``, ``parsl_run_plan``) run single-stage plans only and
+refuse a join plan with a ``TypeError`` naming ``SubmitRunner``.
+
 .. _design-transport-engine:
 
 Letting workers exchange blocks directly

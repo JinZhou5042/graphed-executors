@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from graphed.core.execution import ExecResult, Plan
+from graphed.core.plan import DurablePlanV2
 from graphed.services import ServiceSpec, split_endpoint
 
 from . import launch
-from .backend import _require_importable
+from .backend import _require_plan_importable
 from .launch import ENV_FILE, LOG_FILE, PLAN_FILE, RESULT_FILE, RUN_FILE, CondorPilots, collectors
 from .services import ServiceJob
 from .sites import SITES, SiteProfile, counts_as_alive
@@ -208,7 +209,7 @@ def _write_sub(path: Path, desc: Mapping[str, str]) -> None:
 
 
 def submit_driverless(
-    plan: Plan[Any],
+    plan: Plan[Any] | DurablePlanV2,
     *,
     site: str = "generic",
     image: str | None = None,
@@ -247,9 +248,7 @@ def submit_driverless(
         raise ValueError(
             f"site {site!r} does not let a job submit jobs, so its driver cannot: use pilots='local'"
         )
-    for role in ("process", "combine", "empty", "next_tasks", "stop"):
-        if (part := getattr(plan, role)) is not None:
-            _require_importable(part, role)
+    _require_plan_importable(plan, ("process", "combine", "empty", "next_tasks", "stop"))
     launcher = CondorPilots(
         profile,
         image=image,

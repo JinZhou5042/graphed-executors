@@ -58,6 +58,7 @@ from graphed.debug import StageError
 from graphed.services import require_bound
 
 from .._plan_queue import PlanQueue
+from ..common import refuse_staged
 from ._peer import (
     ERROR_EVENT_DRAIN_S,
     OUTBOX_EXIT_WAIT_S,
@@ -759,6 +760,7 @@ class _BaseExecutor:
         """Run ``plan`` to its reduced result. One plan runs at a time per executor; a concurrent
         caller waits for the running plan to finish. A plan whose services are not bound is refused
         before any task (this runner resolves no services: bind them, or use ``SubmitRunner``)."""
+        refuse_staged(plan, type(self).__name__, "ThreadBackend()")
         require_bound(plan)
         with self._run_lock:
             self._switch_in(self.monitor)

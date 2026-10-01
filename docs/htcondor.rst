@@ -318,7 +318,8 @@ call ``handle.remove()``; it also stops a job that is still running. ``wait()`` 
 done, failed or removed, so ``wait(timeout=None)`` does not return while the job is held: pass a
 ``timeout``, or check ``status()`` for ``held``. Everything a pilot cannot import (a lambda, a
 function defined in ``__main__``) is refused before anything is written or submitted, as for
-``htcondor_runner``.
+``htcondor_runner``; a join or repartition plan's stage functions travel by value instead, so they
+are accepted.
 
 
 Services

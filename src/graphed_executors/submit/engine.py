@@ -34,10 +34,20 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
+import cloudpickle
 from graphed import services as graphed_services
-from graphed.core import ExecContext, ExecResult, Plan, RunControl, RunState, StopReason, Task
+from graphed.core import (
+    DurablePlanV2,
+    ExecContext,
+    ExecResult,
+    Plan,
+    RunControl,
+    RunState,
+    StopReason,
+    Task,
+)
 from graphed.core.execution import (
     LocalResources,
     Monitor,
@@ -50,6 +60,7 @@ from graphed.core.execution import (
     worker_monitor_factory,
 )
 from graphed.debug import SourceFrame, StageError
+from graphed.shuffle import pick, split
 
 from graphed_executors._plan_queue import PlanQueue
 from graphed_executors.local._reduce import plan_tree, running_fold
@@ -236,9 +247,20 @@ def _combine_task(ctx: RunContext, payload: bytes, token: str, a: object, b: obj
     return combine(a, b)
 
 
-def _fingerprint(obj: object) -> tuple[str, bytes]:
+def _stage_task(payload: bytes, token: str, task: Task, *inputs: bytes) -> bytes:
+    """Run one task of a ``DurablePlanV2`` stage: ``process(task, inputs, resources)``."""
+    process = cast("Callable[..., bytes]", _shared_payload(token, payload))
+    return process(task, inputs, current_env().resources)
+
+
+def _map_task(payload: bytes, token: str, task: Task, *inputs: bytes) -> dict[int, bytes]:
+    """A ``map_write`` task, its payload split per dest so each (map, dest) edge moves one slice."""
+    return split(_stage_task(payload, token, task, *inputs))
+
+
+def _fingerprint(obj: object, dumps: Callable[[object], bytes] = pickle.dumps) -> tuple[str, bytes]:
     """(12-hex content fingerprint, pickled payload) — the M31 broadcast-token idiom."""
-    payload = pickle.dumps(obj)
+    payload = dumps(obj)
     return hashlib.sha256(payload).hexdigest()[:12], payload
 
 
@@ -336,9 +358,15 @@ class SubmitRunner:
         self._plans.close()
         self.backend.close()
 
-    def run(self, plan: Plan[R]) -> ExecResult[R]:
+    @overload
+    def run(self, plan: Plan[R]) -> ExecResult[R]: ...
+    @overload
+    def run(self, plan: DurablePlanV2) -> ExecResult[Any]: ...
+    def run(self, plan: Plan[R] | DurablePlanV2) -> ExecResult[R] | ExecResult[Any]:
         """Run ``plan``. Its services are resolved, checked, probed and bound before the first plan task
-        is submitted, and released, with any of its tasks not yet done, when ``run`` returns or raises."""
+        is submitted, and released, with any of its tasks not yet done, when ``run`` returns or raises.
+        A :class:`~graphed.core.DurablePlanV2` (a join or repartition) runs stage by stage to
+        ``plan.value`` of its last stage; a cancel returns ``value=None``."""
         monitor = self.monitor
         control = self.control
         given = self.services
@@ -348,19 +376,20 @@ class SubmitRunner:
 
     def _run_scoped(
         self,
-        plan: Plan[R],
+        plan: Plan[R] | DurablePlanV2,
         monitor: Monitor | None,
         control: RunControl | None,
         given: Mapping[str, str] | None,
         ctx: RunContext,
         scope: contextlib.ExitStack,
-    ) -> ExecResult[R]:
+    ) -> ExecResult[R] | ExecResult[Any]:
         events_seen = [0]
         seen_lock = threading.Lock()  # handlers run on worker threads; += is not atomic without the GIL
         unsub: Callable[[], None] | None = None
         try:
             if control is not None and control.state is RunState.CANCELLED:
-                return ExecResult(plan.empty(), 0, 0, StopReason.CANCELLED)
+                empty = None if isinstance(plan, DurablePlanV2) else plan.empty()
+                return ExecResult(empty, 0, 0, StopReason.CANCELLED)
             bound = plan
             if plan.services:
                 services = ServiceSet(plan.services, self.backend, endpoints=given, scope=ctx.run_nonce)
@@ -376,7 +405,10 @@ class SubmitRunner:
                         emit_task(monitor, _event_from_dict(d))  # swallows a raising monitor (passivity)
 
                 unsub = self.backend.subscribe_events(ctx.monitor_topic, handler)
-            if control is not None:  # the default path never meets a window
+            result: ExecResult[R] | ExecResult[Any]
+            if isinstance(bound, DurablePlanV2):
+                result = self._run_stages(bound, control, ctx, submits)
+            elif control is not None:  # the default path never meets a window
                 if bound.next_tasks is not None:
                     result = self._run_adaptive_windowed(bound, monitor, control, ctx, events_seen, submits)
                 else:
@@ -671,6 +703,82 @@ class SubmitRunner:
         finally:
             if ctx.monitor_topic is not None:  # F2a: drain trailing worker events of every consumed leaf
                 _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * exec_ctx.n_done, _DRAIN_TIMEOUT_S)
+
+    # ---- staged path: a DurablePlanV2's stages as barriers ----
+
+    def _run_stages(
+        self, plan: DurablePlanV2, control: RunControl | None, ctx: RunContext, submits: _RunTasks
+    ) -> ExecResult[Any]:
+        """Submit each stage once the stages it reads have finished. A ``map_write`` task's payload
+        reaches each gather as that gather's slice alone: picked in a task beside it where the backend
+        moves data between workers, else picked here from its one fetch."""
+        backend = self.backend
+        peer = backend.capabilities.peer_data_movement
+        plan_fp = plan.ir_fingerprint()[:12]
+        done_q: queue.Queue[SubmitFuture] = queue.Queue()
+        outstanding: dict[SubmitFuture, bool] = {}  # stage task not yet seen done -> its stage has inputs
+        key_to_task: dict[str, Task] = {}
+        stage_futs: list[list[SubmitFuture]] = []
+        ran = [0, 0]  # tasks of stages with no inputs, tasks of the others
+
+        def settle(needed: list[SubmitFuture]) -> bool:
+            """Wait until ``needed`` is done; False when a completion finds the run cancelled."""
+            remaining = {f for f in needed if f in outstanding}
+            while remaining:
+                fut = done_q.get()  # each stage task completes into the queue once
+                ran[outstanding.pop(fut)] += 1
+                remaining.discard(fut)
+                if fut.exception() is not None:  # exception() transfers no result on dask
+                    self._result(fut, key_to_task)  # raises it, translated
+                if control is not None and control.state is RunState.CANCELLED:
+                    return False
+            return True
+
+        for s, stage in enumerate(plan.stages):
+            upstream = [f for i in stage.inputs for f in stage_futs[i]]
+            if not settle(upstream) or (control is not None and control.wait() is RunState.CANCELLED):
+                return ExecResult(None, ran[0], ran[1], StopReason.CANCELLED)
+            # by value: a resolved opaque process is a copy stdlib pickle cannot name by reference
+            fp, payload = _fingerprint(stage.process.resolve(), cloudpickle.dumps)
+            token = f"{fp}-{ctx.run_nonce}"
+            handle = backend.broadcast(payload, token=token)
+            fn = _map_task if stage.kind == "map_write" else _stage_task
+            # driver edge: each map result is fetched once, then sliced per dest here
+            fetched = {
+                i: [cast("dict[int, bytes]", self._result(f, key_to_task)) for f in stage_futs[i]]
+                for i in stage.inputs
+                if plan.stages[i].kind == "map_write" and not peer
+            }
+            futs: list[SubmitFuture] = []
+            for t, task in enumerate(stage.tasks):
+                args: list[object] = []
+                for i in stage.inputs:
+                    if i in fetched:
+                        args.extend(pick(m, task.key) for m in fetched[i])
+                    elif plan.stages[i].kind == "map_write":
+                        args.extend(
+                            submits.submit(
+                                pick,
+                                f,
+                                task.key,
+                                key=_key(plan_fp, ctx.run_nonce, f"pick.{i}.{m}", task.key),
+                                retries=self._retries,
+                            )
+                            for m, f in enumerate(stage_futs[i])
+                        )
+                    else:
+                        args.extend(stage_futs[i])
+                key = _key(plan_fp, ctx.run_nonce, f"{stage.kind}.{s}", t)
+                key_to_task[key] = task
+                fut = submits.submit(fn, handle, token, task, *args, key=key, retries=self._retries)
+                outstanding[fut] = bool(stage.inputs)
+                fut.add_done_callback(done_q.put)
+                futs.append(fut)
+            stage_futs.append(futs)
+        if not settle(list(outstanding)):
+            return ExecResult(None, ran[0], ran[1], StopReason.CANCELLED)
+        last = [cast("bytes", self._result(f, key_to_task)) for f in stage_futs[-1]]
+        return ExecResult(plan.value(last), ran[0], ran[1], StopReason.EXHAUSTED)
 
     # ---- helpers ----
 

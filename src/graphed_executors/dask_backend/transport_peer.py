@@ -23,6 +23,7 @@ from typing import Any
 from graphed.core.execution import Plan
 from graphed.services import require_bound
 
+from graphed_executors.common import refuse_staged
 from graphed_executors.local._peer import (
     collect_peer_root,
     make_bounds,
@@ -133,6 +134,7 @@ def transport_run_plan(
     root now RAISES rather than defaulting to the identity value (R2). Failure semantics (§1.5): an
     exhausted send / worker death / no captured root restarts the whole run under a fresh epoch up to
     ``epoch_restarts_allowed``, else surfaces as an attributed ``StageError``."""
+    refuse_staged(plan, "transport_run_plan", "DaskBackend(client)")
     require_bound(plan)  # resolves no services: an unbound plan is refused before any task
     require_pin(backend)
     tasks = sorted(plan.tasks, key=lambda t: t.key)

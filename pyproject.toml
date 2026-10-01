@@ -18,7 +18,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 # graphed carries the execution contract (Plan/Task/Partition), Session, and StageError.
-dependencies = ["graphed>=0.0.6"]
+dependencies = ["graphed>=0.0.6", "cloudpickle"]
 
 [project.optional-dependencies]
 # the backends + corpus are only needed to exercise realistic HEP analyses end-to-end in the suite
@@ -140,7 +140,7 @@ exclude = ['^tests/frozen/m69a/data/inclusive_processor\.py$']
 mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54", "examples/hgg"]
 explicit_package_bases = true
 
-# Read-only helpers under tests/frozen/{m44,m47,m63,m65} that tests import by bare basename: pytest
+# Read-only helpers under tests/frozen/{m44,m47,m63,m65,m68c} that tests import by bare basename: pytest
 # puts them on sys.path, mypy knows them only as tests.frozen.mXX.<name>. They stay type-checked
 # under those dotted names; only the import site is Any.
 [[tool.mypy.overrides]]
@@ -151,6 +151,7 @@ module = [
   "m65a_probe",
   "m65a3_bodies",
   "m65b_probe",
+  "m68c_harness",
 ]
 ignore_missing_imports = true
 
@@ -170,6 +171,11 @@ follow_imports = "skip"
 # job installs coffea/higgs_dna/correctionlib; hgg_harness is the frozen m69a harness validate_real.py imports.
 [[tool.mypy.overrides]]
 module = ["coffea.*", "higgs_dna.*", "correctionlib.*", "pyarrow.*", "fsspec", "hgg_harness"]
+ignore_missing_imports = true
+
+# cloudpickle ships no type information.
+[[tool.mypy.overrides]]
+module = ["cloudpickle"]
 ignore_missing_imports = true
 
 # dask/distributed ship no type information; the dask backend is optional and only imported lazily.
