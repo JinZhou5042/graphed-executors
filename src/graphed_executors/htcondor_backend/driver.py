@@ -35,7 +35,6 @@ import logging
 import os
 import pickle
 import sys
-import tempfile
 import time
 import traceback
 from contextlib import ExitStack
@@ -54,7 +53,16 @@ from graphed_executors.submit.services import (
 
 from .announce import URL_FILE
 from .backend import HTCondorBackend, HTCondorRunner
-from .launch import LOG_FILE, PLAN_FILE, RESULT_FILE, RUN_FILE, SECRET_FILE, CondorPilots, LocalPilots
+from .launch import (
+    LOG_FILE,
+    PLAN_FILE,
+    RESULT_FILE,
+    RUN_FILE,
+    SECRET_FILE,
+    CondorPilots,
+    LocalPilots,
+    publish,
+)
 from .server import WorkerLost
 from .sites import SITES
 
@@ -91,8 +99,8 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
             dag_dir = Path(run["dag_dir"])
             # the secret first: a SERVICE node that reads the new url reads the new secret with it
             secret = backend._server.announce_secret(sorted(announced.values()))
-            _publish(dag_dir / SECRET_FILE, secret.hex())
-            _publish(dag_dir / URL_FILE, backend._server.url)
+            publish(dag_dir / SECRET_FILE, secret.hex())
+            publish(dag_dir / URL_FILE, backend._server.url)
         if run["pilots"] == "condor":
             where = f"cluster={launcher.cluster}"
         else:
@@ -106,14 +114,6 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
         )
         on_error.pop_all()
     return runner
-
-
-def _publish(path: Path, text: str) -> None:
-    """Replace ``path`` with ``text`` at once, readable by this user only (``mkstemp``'s mode)."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent)
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
-    os.replace(tmp, path)
 
 
 def _result_blob(ok: bool, payload: object) -> bytes:

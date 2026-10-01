@@ -76,10 +76,16 @@ def ensure_credential(htc: Any, desc: Mapping[str, str]) -> None:
         ) from exc
 
 
+def publish(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` at once, readable by this user only (``mkstemp``'s mode)."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def write_secret(path: Path, secret: bytes) -> None:
-    path.touch(mode=0o600)
-    path.chmod(0o600)  # touch keeps an existing file's mode
-    path.write_text(secret.hex())
+    publish(path, secret.hex())
 
 
 @runtime_checkable

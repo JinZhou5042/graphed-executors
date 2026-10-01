@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import getpass
+import os
+import stat
+import sys
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -168,3 +171,24 @@ def test_the_credd_is_not_asked_without_a_credential_or_inside_a_job(case: str) 
         pilots._submit(fake, fake, pilots.submit_description("http://h:1", 1), 1, stack)
         stack.pop_all()
     assert "query krb" not in fake.log and "submit" in fake.log, fake.log
+
+
+def test_a_rewritten_secret_appears_whole_and_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / launch.SECRET_FILE
+    path.write_text("stale")
+    path.chmod(0o644)
+    seen: list[tuple[str, str]] = []
+    replace = os.replace
+
+    def spy(src: str, dst: str) -> None:
+        seen.append((Path(dst).read_text(), Path(src).read_text()))
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    launch.write_secret(path, b"\x01\xfe")
+    assert seen == [("stale", "01fe")]
+    assert path.read_text() == "01fe"
+    if sys.platform != "win32":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
