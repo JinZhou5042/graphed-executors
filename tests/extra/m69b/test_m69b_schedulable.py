@@ -894,6 +894,29 @@ class SlotPool(Pool):
         return [self.classad2.ClassAd(f"[ {request} ]")]
 
 
+def test_a_later_plan_s_refusal_says_the_runner_s_pilots_keep_their_slots_until_it_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    classad2 = pytest.importorskip("classad2")  # ships with the htcondor bindings (Linux)
+    pool = SlotPool(classad2)
+    monkeypatch.setattr(launch, "_htcondor", lambda: pool)
+    monkeypatch.setattr(launch, "CLOSE_WAIT_S", 0.0)
+    pilots = CondorPilots("generic", log_dir=tmp_path, request_memory_mb=500)
+    backend = HTCondorBackend(pilots, 1, host="127.0.0.1", service_hosts=("cluster",))
+    try:
+        backend._need()  # a first plan's need of a worker: the deferred pilots are submitted
+        assert pilots.cluster is not None
+        pool.running.add(pilots.cluster[1])
+        with pytest.raises(ServiceUnavailable) as refused:
+            ServiceSet([spec("web", 600)], backend, scope="later").start()
+        managed = refused.value.legs["managed"]
+        label = f"pilots (cluster {pilots.cluster[1]}, whose slots stay taken until it closes)"
+        assert label in managed, managed
+        assert "beside them is 500 MiB" in managed, managed
+    finally:
+        backend.close()
+
+
 def test_a_first_plan_s_server_is_refused_where_only_its_set_s_earlier_server_holds_room(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -922,7 +945,8 @@ def test_a_first_plan_s_server_is_refused_where_only_its_set_s_earlier_server_ho
             ServiceSet([spec("web1", 600), spec("web2", 600)], backend, scope="s").start()
         managed = refused.value.legs["managed"]
         web1, web2 = (int(e.rsplit(" ", 1)[1]) for k, e in pool.log if k == "submit" and "-s-" in e)
-        assert f"'web1' (cluster {web1})" in managed and "'other'" not in managed, managed
+        assert f"'web1' (cluster {web1}, whose slot stays taken until the run ends)" in managed, managed
+        assert "'other'" not in managed, managed
         assert "beside them is 400 MiB" in managed, managed
         assert pilots.cluster is None and ("act", f"Remove ClusterId == {web2}") in pool.log, pool.log
     finally:

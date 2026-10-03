@@ -167,12 +167,11 @@ class ServiceJob:
         """Why no slot of ``machines`` could ever run this queued job, else ``None``: its whole ad (the
         request, the site's and the user's submit keys) must ``symmetricMatch`` a slot's ad whose free
         ``Memory``/``Cpus``/``GPUs``/``Disk`` are a partitionable slot's totals, so a busy pool still
-        matches, less what ``claims`` hold there (by holder, the running ads of the runner's pilots and
-        of the set's earlier servers, which keep their slots to the run's end); ``None`` when
-        ``machines`` is empty."""
+        matches, less what ``claims`` hold there (by holder, the running ads of the runner's pilots, which
+        keep their slots until the runner closes, and of the set's earlier servers, which keep theirs until
+        the run ends); ``None`` when ``machines`` is empty."""
         if not machines:  # a collector that lists no slot says nothing about the pool: submit and wait
             return None
-        assert self.cluster is not None, "matched only once submitted"
         ads = list(self.launcher._schedd.query(constraint=f"ClusterId == {self.cluster}"))
         if not ads:  # it already left the queue: the announce wait reports how
             return None
@@ -189,8 +188,8 @@ class ServiceJob:
         largest = max(int(slot.get("Memory", 0)) for slot in slots)
         if held:
             return (
-                f"service job {self.key} matches no slot of the pool beside {' and '.join(held)}, which keep "
-                f"their slots until the run ends: {asked}; the largest slot memory beside them is {largest} MiB"
+                f"service job {self.key} matches no slot of the pool beside {' and '.join(held)}: {asked}; "
+                f"the largest slot memory beside them is {largest} MiB"
             )
         return (
             f"service job {self.key} matches no slot of the pool, busy or not: {asked}; "

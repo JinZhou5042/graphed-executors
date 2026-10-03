@@ -486,7 +486,8 @@ and state every 30 seconds. The runner's queued pilots never take that room:
 * **One plan's services start at a time.** Plans of one runner overlap (a ``submit`` beside a
   ``run``, or ``run`` from two threads), but their service sets start one after another, each through
   its worker probe, so no plan's server waits for room that another plan still starting holds. A plan
-  waiting its turn raises ``RuntimeError`` naming the close once the runner closes or stops waiting.
+  waiting its turn waits as long as the starting plan waits for its slot, even when its own servers
+  would fit now, and raises ``RuntimeError`` naming the close once the runner closes or stops waiting.
 * **Closing.** ``runner.close()``, or leaving the ``with`` block normally, waits for every submitted
   plan, a server still waiting for its slot included. Ctrl-C anywhere (in the ``with`` block, or in
   ``close()`` itself) ends the wait and removes the run's jobs, its servers and its pilots. Any other

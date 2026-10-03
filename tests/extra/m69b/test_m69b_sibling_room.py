@@ -95,7 +95,7 @@ def test_a_server_that_fits_only_where_its_set_s_earlier_one_runs_is_refused_nam
     assert harness.wait_for(lambda: not order.queued(schedd, f"{RUN_JOBS} && QDate >= {t0}"), GONE_S)
     web1, web2 = servers(schedd, t0)
     managed = refused.legs["managed"]
-    assert f"'web1' (cluster {web1})" in managed, managed
+    assert f"'web1' (cluster {web1}, whose slot stays taken until the run ends)" in managed, managed
     assert harness.wait_for(lambda: order.unrun(schedd, f"ClusterId == {web1}") == [(1, True)], GONE_S)
     assert harness.wait_for(lambda: order.unrun(schedd, f"ClusterId == {web2}") == [(0, False)], GONE_S)
 
