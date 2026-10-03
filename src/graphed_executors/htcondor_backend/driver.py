@@ -102,7 +102,11 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
             publish(dag_dir / SECRET_FILE, secret.hex())
             publish(dag_dir / URL_FILE, backend._server.url)
         if run["pilots"] == "condor":
-            where = f"cluster={launcher.cluster}"
+            where = (
+                f"cluster={launcher.cluster}"
+                if launcher.cluster
+                else "submitted at the first need of a worker"
+            )
         else:
             where = f"pids={[p.pid for p in launcher._procs]}"
         print(f"{n} {run['pilots']} pilots on {backend._server.url} {where}", file=log, flush=True)
@@ -160,11 +164,11 @@ def main(argv: list[str] | None = None) -> int:
                 plan = pickle.load(f)
             runner = _runner(run, job, log)
             try:
-                live = runner.wait_for_pilots()
-                print(f"{live} pilots live after {time.monotonic() - start:.1f}s", file=log, flush=True)
                 # the driver job's own set: its failures are environment (exit 1) whatever their type
                 given = run.get("endpoints") or {}
                 with ServiceSet(plan.services, runner.backend, endpoints=given) as endpoints:
+                    live = runner.wait_for_pilots()  # after the SERVICE nodes' announces; a failure exits 1
+                    print(f"{live} pilots live after {time.monotonic() - start:.1f}s", file=log, flush=True)
                     runner.services = endpoints
                     try:
                         result, code = runner.run(plan), EXIT_DONE

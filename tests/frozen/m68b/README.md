@@ -62,10 +62,10 @@ coverage gate is what measures `announce.py`.
 | `…::test_the_sigterm_handler_never_waits_and_ignores_further_sigterms` | row 2 `on_sigterm` in process; FoN SIGTERM handler that waits |
 | `…::test_the_stop_path_signals_no_child_popen_already_reaped` | row 2 `main()` → 143, no `os.kill`; FoN reaped child's pid signalled |
 | `…::test_the_stop_path_signals_an_unreaped_child_once` | row 2 control (POSIX): exactly one SIGTERM |
-| `…::test_host_service_forgets_its_announce_secret_when_construction_refuses` | row 2 missing input after the mint; FoN announce secret left registered after a failed call |
+| `…::test_host_service_forgets_its_announce_secret_when_construction_refuses` | row 2 missing input after the mint: no `graphed-service-` submit, whenever the pilots are submitted (§5.2 "Ordering", `freeze-m68b-fixup4`); FoN announce secret left registered after a failed call |
 | `…::test_a_failed_submit_or_spool_leaves_no_cluster_and_no_registered_secret[spool,submit]` | row 2 m68a failed-spool shape; FoN failed-spool `ServiceJob` left queued |
-| `…::test_host_service_returns_the_announced_endpoint_and_releases_in_order[*]` | §3.3 `host_service` (key `<scope>-<hex16>`, endpoint scheme per check, identity) and `release_service` (forget, then stop); FoN announce secret left registered after a released call, service outliving its run |
-| `…::test_host_service_fails_a_gone_held_or_late_job_and_forgets_its_key[gone,held,idle,spooling]` | §3.3 host_service failure paths; FoN timed-out/dead `ServiceJob` left queued, secret left registered |
+| `…::test_host_service_returns_the_announced_endpoint_and_releases_in_order[*]` | §3.3 `host_service` (key `<scope>-<hex16>`, endpoint scheme per check, identity) and `release_service` (forget, then stop); the service job's is the one submit, no pilot being needed (§5.2 "Ordering", `freeze-m68b-fixup4`); FoN announce secret left registered after a released call, service outliving its run |
+| `…::test_host_service_fails_a_gone_held_or_late_job_and_forgets_its_key[gone,held,idle,spooling]` | §3.3 host_service failure paths; idle/spooling then running: `timeout_s` counts from the first `JobStatus 2` answer (§5.2 "Schedulability", `freeze-m68b-fixup3`); FoN timed-out/dead `ServiceJob` left queued, secret left registered, a deadline running while idle or spooling |
 | `…::test_an_attached_service_announces_once_ready_from_a_clean_start` | row 2 `../graphed-secret` False, beats 200, env merge, SIGTERM unblocked, port in range, identity = `host_identity()`; FoN announce before readiness or without identity, pilot secret readable through the service, recipe `env` replacing the job's |
 | `…::test_the_child_s_cwd_holds_exactly_the_inputs` | row 2 `user.cc` 404, `models/<file>` 200; FoN user credential or other file in the cwd |
 | `…::test_a_relative_python_is_resolved_in_the_job_dir` | row 2 `./env/bin/python` wrapper marker; FoN relative `{python}` left relative or resolved against `service/` |
@@ -83,7 +83,7 @@ coverage gate is what measures `announce.py`.
 | `…::test_an_orphaned_service_is_reaped_and_exits_0[no-200-ever,another-secret,server-gone]` | row 2 orphan rule; FoN orphaned before its first announce |
 | `…::test_watch_mode_announces_each_new_url_and_secret` | row 2 watch mode, SIGTERM reaps the child |
 | `test_cluster_services_live.py::test_a_cluster_hosted_http_server_serves_its_run_and_leaves_with_it` | row 3 (a): `Machine` identity in the status and every probe answer, task GET, `/service.json` 404, removal polled, `forget_announce` before `stop`, per-run clusters, overlap removes only its own, history ordering against `t`; FoN service outliving its run, run releasing another run's service |
-| `…::test_a_late_or_dead_service_job_is_removed_and_its_key_forgotten` | row 3 (b): `gpus=2` `TimeoutError` naming 20 and JobStatus 1; exit-at-once `RuntimeError` naming JobStatus 4 before `timeout_s`; both gone (polled) and forgotten |
+| `…::test_a_late_or_dead_service_job_is_removed_and_its_key_forgotten` | row 3 (b): `gpus=2` refused before it ran (`ServiceUnavailable` naming `RequestGPUs 2` and the largest slot memory, history `NumJobStarts 0`; §5.2 "Schedulability", `freeze-m68b-fixup3`); exit-at-once `RuntimeError` naming JobStatus 4 before `timeout_s`; both gone (polled) and forgotten |
 
 Not a test: "`announce.py` passes `test-htcondor`'s per-file gate (≥ 90%) with these legs executing
 it" and FoN "an `announce.py` the frozen suite does not measure" are CI's per-file coverage gate over

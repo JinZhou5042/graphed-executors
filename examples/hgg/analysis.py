@@ -7,11 +7,15 @@ assignment, and every place the original forces a value (``int()``, ``len()``, `
 
 One plan covers a whole fileset. Each dataset records its own graph (data and MC differ), and
 ``graphed.collate`` joins them. Each task writes the original's parquet part for its chunk, with
-that chunk's sums in the part's metadata, beside the counters that the runner tree-reduces:
+that chunk's sums in the part's metadata, beside the counters that the runner tree-reduces and the
+``DIAGNOSTICS`` histograms of the selected diphotons:
 
     fileset = {"MC": {"mc.root": {"object_path": "Events", "steps": [[0, 100], [100, 200]]}}}
     plan = analysis.plan(fileset, year="2024", out="out")
-    SequentialRunner().run(plan).value              # {dataset: counters}, as coffea's Runner accumulates
+    SequentialRunner().run(plan).value   # {dataset: {**counters, "diagnostics": {name: bh.Histogram}}}
+
+The diagnostics are local boost histograms; with a ``graphed_histogram.histserv.Context`` they fill
+on the context's histserv servers, which the plan declares as services for the runner to start.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, ClassVar
 
+import boost_histogram as bh
 import correctionlib
 import numpy
 from coffea import processor
@@ -38,6 +43,8 @@ from graphed.awkward import gak, parquet_write
 from graphed.core import Partition
 from graphed.core.execution import Plan
 from graphed.preserve.externals import ExternalPlugin, record_external, sha256_bytes
+from graphed_histogram import boost as ghb
+from graphed_histogram import histserv
 from higgs_dna.utils.misc_utils import infer_nano_version
 
 logger = logging.getLogger(__name__)
@@ -857,8 +864,80 @@ def part_name(partition: Partition) -> str:
     return f"{Path(partition.uri).stem}_{tree}_{partition.entry_start}-{partition.entry_stop}.parquet"
 
 
-def dataset_plan(dataset: str, files: Mapping[str, Any], *, year: str, out: str) -> Plan[dict[str, Any]]:
-    """One dataset's plan over coffea's ``files`` mapping, whose files each give explicit "steps"."""
+#: name -> (the selected diphotons' column it fills, ``Regular(bins, low, high)``); Weight storage,
+#: weighted by the ``weight`` column
+DIAGNOSTICS: dict[str, tuple[str, tuple[int, float, float]]] = {
+    "m_gg": ("mass", (80, 100.0, 180.0)),
+    "pt_gg": ("pt", (50, 0.0, 250.0)),
+    "lead_pt": ("lead_pt", (50, 0.0, 200.0)),
+    "sublead_pt": ("sublead_pt", (50, 0.0, 200.0)),
+    "lead_eta": ("lead_eta", (50, -2.5, 2.5)),
+    "sublead_eta": ("sublead_eta", (50, -2.5, 2.5)),
+    "n_jets": ("n_jets", (8, -0.5, 7.5)),
+}
+
+
+def diagnostics(record: Any, context: histserv.Context | None = None) -> dict[str, ghb.Histogram]:
+    """The ``DIAGNOSTICS`` of the flat diphoton ``record``: local boost histograms, or histserv
+    histograms on ``context``'s servers."""
+    out: dict[str, ghb.Histogram] = {}
+    for name, (column, (bins, low, high)) in DIAGNOSTICS.items():
+        axis, storage = bh.axis.Regular(bins, low, high), bh.storage.Weight()
+        if context is None:
+            hist = ghb.Histogram(axis, storage=storage)
+        else:
+            hist = histserv.Histogram(axis, storage=storage, context=context)
+        hist.fill(record[column], weight=record["weight"])
+        out[name] = hist
+    return out
+
+
+def _counters(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in value.items() if k != "diagnostics"}
+
+
+@dataclass(frozen=True)
+class HggReduce:
+    """A chunk's counters beside its ``"diagnostics"``: ``counters`` reads the plan's first values,
+    ``histograms`` (the diagnostics' ``pieces.reduce``) each fill at its compiled position."""
+
+    counters: Counters
+    histograms: Any
+
+    def __call__(self, values: list[Any]) -> dict[str, Any]:
+        return {**self.counters(values), "diagnostics": self.histograms(values)}
+
+    def resolve_services(self, value: dict[str, Any]) -> dict[str, Any]:
+        """``value`` with each histserv receipt replaced by its server histogram."""
+        return {**value, "diagnostics": self.histograms.resolve_services(value["diagnostics"])}
+
+
+@dataclass(frozen=True)
+class HggCombine:
+    """Two values combined: the counters by :func:`accumulate`, the diagnostics by ``histograms``."""
+
+    histograms: Any
+
+    def __call__(self, a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+        both = self.histograms(a["diagnostics"], b["diagnostics"])
+        return {**accumulate(_counters(a), _counters(b)), "diagnostics": both}
+
+
+@dataclass(frozen=True)
+class HggEmpty:
+    """No chunk yet: no counters, and the diagnostics' empty value."""
+
+    histograms: Any
+
+    def __call__(self) -> dict[str, Any]:
+        return {"diagnostics": self.histograms()}
+
+
+def dataset_plan(
+    dataset: str, files: Mapping[str, Any], *, year: str, out: str, context: histserv.Context | None = None
+) -> Plan[dict[str, Any]]:
+    """One dataset's plan over coffea's ``files`` mapping, whose files each give explicit "steps";
+    its diagnostics fill on ``context``'s servers when one is given."""
     events = NanoEventsFactory.from_root(
         dict(files), schemaclass=NanoAODSchema, mode="graphed", metadata={"dataset": dataset}
     ).events()
@@ -871,26 +950,44 @@ def dataset_plan(dataset: str, files: Mapping[str, Any], *, year: str, out: str)
         metadata=outputs["metadata"],
         arrow_options={"extensionarray": False},
     )
-    return aggregate_plan(
-        *counters.values(),
-        reduce=Counters(tuple(counters)),
-        combine=accumulate,
-        empty=dict,
-        writes=[part],
+    pieces = ghb.pieces(diagnostics(outputs["record"], context))
+    served: Plan[dict[str, Any]] = pieces.serve(
+        aggregate_plan(
+            *counters.values(),
+            *pieces.fill_nodes,
+            reduce=HggReduce(Counters(tuple(counters)), pieces.reduce),
+            combine=HggCombine(pieces.combine),
+            empty=HggEmpty(pieces.empty),
+            externals=pieces.externals,
+            on_compiled=pieces.on_compiled,
+            writes=[part],
+        )
+    )
+    return served
+
+
+def plan(
+    fileset: Mapping[str, Mapping[str, Any]], *, year: str, out: str, context: histserv.Context | None = None
+) -> Plan[dict[str, Any]]:
+    """One plan over coffea's ``{dataset: files}``: ``run(plan).value`` is ``{dataset: {**counters,
+    "diagnostics": {name: histogram}}}``, and each chunk's part lands at
+    ``out/<dataset>/nominal/<file stem>_Events_<start>-<stop>.parquet``. Every dataset's diagnostics
+    fill on ``context``'s servers when one is given."""
+    return collate(
+        {ds: dataset_plan(ds, files, year=year, out=out, context=context) for ds, files in fileset.items()}
     )
 
 
-def plan(fileset: Mapping[str, Mapping[str, Any]], *, year: str, out: str) -> Plan[dict[str, Any]]:
-    """One plan over coffea's ``{dataset: files}``: ``run(plan).value`` is ``{dataset: counters}``,
-    and each chunk's part lands at ``out/<dataset>/nominal/<file stem>_Events_<start>-<stop>.parquet``."""
-    return collate({ds: dataset_plan(ds, files, year=year, out=out) for ds, files in fileset.items()})
-
-
 __all__ = [
+    "DIAGNOSTICS",
     "LUMIMASK_PLUGIN",
     "Counters",
+    "HggCombine",
+    "HggEmpty",
     "HggInclusiveProcessor",
+    "HggReduce",
     "dataset_plan",
+    "diagnostics",
     "lumi_mask",
     "part_name",
     "plan",

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import boost_histogram as bh
 import hgg_harness as h
 import pyarrow.parquet as pq
 import pytest
@@ -77,9 +78,12 @@ def test_one_plan_writes_every_part_and_returns_the_totals(
     value = runner.run(plan).value
     expected = accumulate([counters for parts in oracle.values() for counters, _ in parts.values()])
     assert sorted(value) == sorted(FIXTURES)
-    assert value == expected
+    totals = {ds: {k: v for k, v in leaves.items() if k != "diagnostics"} for ds, leaves in value.items()}
+    assert totals == expected
     for ds, leaves in expected.items():
-        assert {k: type(v) for k, v in value[ds].items()} == {k: type(v) for k, v in leaves.items()}
+        assert {k: type(v) for k, v in totals[ds].items()} == {k: type(v) for k, v in leaves.items()}
+        assert set(value[ds]["diagnostics"]) == set(analysis.DIAGNOSTICS)
+        assert all(isinstance(hist, bh.Histogram) for hist in value[ds]["diagnostics"].values())
     expected_parts = {part_path(tmp_path, ds, s, e) for ds in FIXTURES for s, e in RANGES}
     assert set(tmp_path.rglob("*.parquet")) == expected_parts
     for ds, parts in oracle.items():

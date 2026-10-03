@@ -48,11 +48,11 @@ def test_htcondor_runner_binds_the_site_ports_unless_overridden(
     )  # the override beats a real default
     seen: list[str] = []
 
-    def start(self: Any, url: str, secret: bytes, n: int) -> None:
+    def prepare(self: Any, url: str, secret: bytes) -> None:
         seen.append(url)
         raise BindingsReached
 
-    monkeypatch.setattr(CondorPilots, "start", start)
+    monkeypatch.setattr(CondorPilots, "prepare", prepare)
     with pytest.raises(BindingsReached):
         htcondor_runner(n_pilots=1, site="lxplus", image="img", host="127.0.0.1", port_range=port_range)
     assert expected[0] <= bound_port(seen[0]) <= expected[1], seen

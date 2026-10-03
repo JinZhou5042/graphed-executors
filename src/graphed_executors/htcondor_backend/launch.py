@@ -3,7 +3,7 @@
 
 A pilot is ``python -m graphed_executors.htcondor_backend.pilot <url> <secret file>``. The secret travels
 as a transferred file, never in ``arguments`` or ``environment``: both are readable by anyone who can
-query the job ad. ``htcondor2`` is imported only by :func:`_htcondor`, at ``CondorPilots.start``.
+query the job ad. ``htcondor2`` is imported only by :func:`_htcondor`, at ``CondorPilots.prepare``.
 
 Each launcher registers the release of what it acquires the moment the acquisition returns (a pilot
 process once spawned, a cluster once ``schedd.submit`` returns, before its sandbox spools), so a start
@@ -42,6 +42,19 @@ ENV_FILE = "env.tgz"
 # a driverless job's files; here, not in driver.py, so importing the package never imports the -m entry
 PLAN_FILE, RUN_FILE, RESULT_FILE, LOG_FILE = "plan.pkl", "run.json", "result.pkl", "driver.log"
 PILOT_MODULE = "graphed_executors.htcondor_backend.pilot"
+HOLD_REASON = "graphed: a service of this run waits for a slot"
+SLOT_RESOURCES = ("Memory", "Cpus", "GPUs", "Disk")  # a running job holds <r>Provisioned, else Request<r>
+
+
+class CondorReason(tuple[str, None]):
+    """A ``Schedd.act`` reason: htcondor2 (25.13, 25.14) applies a ``(text, code)`` tuple and drops a
+    ``str``, and the schedd appends `` (by user <name>)`` to the text. ``str()`` is the text."""
+
+    def __new__(cls, text: str) -> CondorReason:
+        return super().__new__(cls, (text, None))
+
+    def __str__(self) -> str:
+        return self[0]
 
 
 def _htcondor() -> Any:
@@ -174,6 +187,8 @@ class CondorPilots:
         self.schedd_locate = schedd_locate
         self.cluster: tuple[str, int] | None = None  # (schedd name, ClusterId): the choice varies per run
         self._schedd: Any = None
+        self._schedd_name = ""
+        self._script = Path("pilot.sh")
         self._constraint = ""
         self._secret = Path(SECRET_FILE)
         self._batch = f"graphed-pilots-{uuid.uuid4().hex[:8]}"
@@ -237,7 +252,11 @@ class CondorPilots:
         if profile.ship_env:
             _check_shippable(self.env)
 
-    def start(self, url: str, secret: bytes, n: int) -> None:
+    def prepare(self, url: str, secret: bytes) -> None:
+        """Everything :meth:`start` does but the pilots' submit (the refusals, ``log_dir``, the secret,
+        ``pilot.sh`` and ``env.tgz``, the schedd choice), once: a service job needs only these."""
+        if self._schedd is not None:
+            return
         self._refuse()
         # absolute in the cwd the files are written from: stop() and a service job may read it from another
         self.log_dir = Path(
@@ -246,16 +265,17 @@ class CondorPilots:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._secret = self.log_dir / SECRET_FILE
         write_secret(self._secret, secret)
-        script = self._stage(self.log_dir, "pilot.sh", PILOT_MODULE)
+        self._script = self._stage(self.log_dir, "pilot.sh", PILOT_MODULE)
+        self._schedd_name, self._schedd = self._choose(_htcondor())
+
+    def start(self, url: str, secret: bytes, n: int) -> None:
+        self.prepare(url, secret)
         # a relative executable resolves against our cwd, not initialdir
-        desc = self.submit_description(url, n, {"executable": str(script)})
-        htc = _htcondor()
-        name, schedd = self._choose(htc)
+        desc = self.submit_description(url, n, {"executable": str(self._script)})
         with ExitStack() as stack:
-            result = self._submit(htc, schedd, desc, n, stack)
-            self.cluster = (name, int(result.cluster()))
+            result = self._submit(_htcondor(), self._schedd, desc, n, stack)
+            self.cluster = (self._schedd_name, int(result.cluster()))
             self._constraint = f"ClusterId == {self.cluster[1]}"
-            self._schedd = schedd
             self._stack = stack.pop_all()
 
     @property
@@ -302,7 +322,7 @@ class CondorPilots:
             if self.profile.spool and any(ad.get("JobStatus") == 4 for ad in left):
                 schedd.retrieve(f"{constraint} && JobStatus == 4")
             # a spooled job stays in the queue after it completes until it is removed
-            schedd.act(htc.JobAction.Remove, constraint, reason="graphed: run closed")
+            schedd.act(htc.JobAction.Remove, constraint, reason=CondorReason("graphed: run closed"))
 
     def _choose(self, htc: Any) -> tuple[str, Any]:
         """The site's schedd: lowest :func:`schedd_weight` among the query's ads, asking each collector
@@ -331,8 +351,29 @@ class CondorPilots:
         raise RuntimeError(f"no schedd found through {param}: {'; '.join(errors)}")
 
     def alive(self) -> int:
-        ads = self._schedd.query(constraint=self._constraint, projection=["JobStatus", "HoldReasonCode"])
-        return sum(counts_as_alive(ad) for ad in ads)
+        """Pilots idle, running, spooling, or held by :meth:`hold_queued` (a hold graphed releases)."""
+        ads = self._schedd.query(
+            constraint=self._constraint, projection=["JobStatus", "HoldReasonCode", "HoldReason"]
+        )
+        return sum(counts_as_alive(ad) or str(ad.get("HoldReason", "")).startswith(HOLD_REASON) for ad in ads)
+
+    def hold_queued(self) -> None:
+        """Hold the idle pilots, under graphed's own reason, so none takes a slot a service waits for."""
+        constraint = f"{self._constraint} && JobStatus == 1"
+        self._schedd.act(_htcondor().JobAction.Hold, constraint, reason=CondorReason(HOLD_REASON))
+
+    def release_held(self) -> None:
+        """Release the pilots :meth:`hold_queued` held; a hold anyone else placed stays."""
+        ours = f'substr(HoldReason, 0, {len(HOLD_REASON)}) == "{HOLD_REASON}"'
+        constraint = f"{self._constraint} && JobStatus == 5 && {ours}"
+        self._schedd.act(_htcondor().JobAction.Release, constraint)
+
+    def running_claims(self, jobs: str | None = None) -> list[Any]:
+        """The running ads of ``jobs`` (a constraint; the pilots by default): the slot each runs in and
+        what it was given there."""
+        constraint = f"{jobs or self._constraint} && JobStatus == 2"
+        sizes = [f"{r}Provisioned" for r in SLOT_RESOURCES] + [f"Request{r}" for r in SLOT_RESOURCES]
+        return list(self._schedd.query(constraint=constraint, projection=["RemoteHost", *sizes]))
 
     def _drain(self) -> None:
         deadline = time.monotonic() + CLOSE_WAIT_S
@@ -341,9 +382,10 @@ class CondorPilots:
 
     def stop(self) -> None:
         """Wait for the pilots to exit, fetch the spooled logs into ``log_dir``, and remove the jobs."""
-        release_quietly(
-            f"the wait for the pilots of {self.cluster} to exit", self._drain
-        )  # removal still runs
+        if self.cluster is not None:  # none submitted: nothing to wait for
+            release_quietly(
+                f"the wait for the pilots of {self.cluster} to exit", self._drain
+            )  # removal still runs
         self._stack.close()
         self._secret.unlink(missing_ok=True)
 

@@ -6,7 +6,8 @@ a standalone distillation of HiggsDNA's H→γγ inclusive base processor. It co
 filters and triggers, photon preselection, diphoton building, the detector-level fiducial cut, the
 cleaned jet variables, and the particle-level truth and fiducial flags. For each chunk it writes one
 flat parquet file of diphoton candidates and counts the chunk's events and weights. One plan runs
-it over a whole fileset, MC and data together, and returns each dataset's summed counters.
+it over a whole fileset, MC and data together, and returns each dataset's summed counters and
+diagnostic histograms.
 
 The translation keeps the original's methods, names and cut values. Events are coffea NanoEvents in
 graphed mode:
@@ -33,8 +34,67 @@ weights, the truth columns), so each dataset records its own graph. ``dataset_pl
 weight sums. ``graphed.collate`` joins the datasets' plans into the one plan ``plan`` returns. Each
 task reads its chunk once, writes its part, and returns its counters, and the runner tree-reduces
 the counters with ``coffea.processor.accumulate``, as coffea's ``Runner`` does. The value is
-``{dataset: counters}``. ``plan({dataset: files})`` runs one dataset on its own, so datasets can
-be submitted separately, and a dict union of their values is the same result.
+``{dataset: counters}``, each beside its ``"diagnostics"`` (below). ``plan({dataset: files})`` runs
+one dataset on its own, so datasets can be submitted separately, and a dict union of their values is
+the same result.
+
+
+Diagnostics
+-----------
+
+Beside the counters, every dataset's value has ``"diagnostics"``: seven histograms of the selected
+diphotons, named in ``analysis.DIAGNOSTICS``, each with Weight storage and filled with the record's
+``weight``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 25 55
+
+   * - Name
+     - Column
+     - Axis
+   * - ``m_gg``
+     - ``mass``
+     - ``Regular(80, 100, 180)``
+   * - ``pt_gg``
+     - ``pt``
+     - ``Regular(50, 0, 250)``
+   * - ``lead_pt``, ``sublead_pt``
+     - ``lead_pt``, ``sublead_pt``
+     - ``Regular(50, 0, 200)``
+   * - ``lead_eta``, ``sublead_eta``
+     - ``lead_eta``, ``sublead_eta``
+     - ``Regular(50, -2.5, 2.5)``
+   * - ``n_jets``
+     - ``n_jets``
+     - ``Regular(8, -0.5, 7.5)``
+
+They fill in the same pass as the counters and the parquet part, from the same flat record the part
+holds. Without a context they are ``graphed_histogram.boost`` histograms, whose partials the runner
+adds through the reduction. With ``plan(..., context=ctx)``, a ``graphed_histogram.histserv.Context``,
+they are filled on the context's histserv servers instead, which ``plan.services`` declares, so the
+runner starts them, binds them, and reads the histograms back out of them at the end. One context
+serves every dataset of the plan. Either way the value holds ``boost_histogram.Histogram`` objects:
+
+.. code-block:: python
+
+    from graphed_histogram import histserv
+    from graphed_executors.submit import SubmitRunner, ThreadBackend
+
+    ctx = histserv.Context(memory_mb=512, workers=4, name="hgg")
+    plan = analysis.plan(fileset, year="2024", out="out", context=ctx)
+    with SubmitRunner(ThreadBackend(4)) as runner:   # starts the servers beside the driver
+        value = runner.run(plan).value
+    value["MC"]["diagnostics"]["m_gg"]               # a boost_histogram.Histogram
+
+``dataset_plan`` composes the two halves through ``graphed_histogram.boost.pieces``: the plan's
+outputs are the counters followed by the histograms' fill nodes, ``HggReduce`` builds a chunk's
+counters and its histograms (and forwards ``resolve_services`` to the histogram half), and
+``HggCombine`` and ``HggEmpty`` do the same for the combine and the empty value.
+
+``examples/hgg/run_local.py`` prints the counters and saves the diagnostics as UHI JSON
+(``--histograms``); ``examples/hgg/run_lpc.py`` runs the analysis at the LPC with the diagnostics
+on histserv servers (:doc:`htcondor`, "An H→γγ run").
 
 
 What changed, and why
@@ -115,6 +175,11 @@ the original's schema. The suite runs one plan over both fixtures on ``Sequentia
 original's counters, and each part must match the original's part for its range. It also records every events object coffea hands out while
 the plan is built and run, and requires each to be graphed NanoEvents.
 
+``tests/frozen/m69b`` checks the diagnostics against a direct ``boost_histogram`` fill of the
+original's parts' columns, folded in part order: bit for bit without a context and with one worker
+filling on the servers, and to 1e-12 relative with three workers or local pilots. Its MC fixture has
+random-signed lognormal ``genWeight`` values (float32), so cancellations reach every bin.
+
 ``examples/hgg/validate_real.py --parts 2`` runs the same comparison on real 2024 NanoAOD over
 xrootd: the first file of ``GluGluHto2G_M-125_amcatnlo_2024`` and the first of ``DataC_2024``. It
 prints each file's entry count, every part's ``compare_part`` result, and each dataset's
@@ -122,5 +187,5 @@ accumulated counters beside the plan's. It exits 1 on any difference.
 
 The CI job ``test-hgg`` (ubuntu, Python 3.12) installs the coffea fork, ``uproot`` from the commit
 the fork needs, and ``higgs_dna`` with ``--no-deps``. It then runs
-``GRAPHED_HGG_REQUIRED=1 pytest tests/frozen/m69a``. The main matrix has no coffea, so the files
-skip there.
+``GRAPHED_HGG_REQUIRED=1 pytest tests/frozen/m69a`` and the m69b ``test_hgg_*`` files. The main
+matrix has no coffea, so the files skip there.

@@ -49,6 +49,19 @@ Services a plan calls
   ``pilots="condor"`` now reads it too, so a site row without one refuses self-submission.
   ``RunHandle`` gains ``dag``; a handle saved before loads as before. A ``user_modules`` path holding
   ``,`` is refused, since it would split the job's input list.
+* A service starts only where it can run. ``htcondor_runner(..., service_hosts=)`` narrows where the
+  runner may start services (``("driver",)``, ``("cluster",)``). A service beside the driver must
+  fit, with the others there, in ``backend.driver_memory_mb`` (a driver job's slot ``Memory``) or else
+  the host's physical memory; one that does not runs on the cluster or is refused with the sizes
+  named. A cluster service job no slot of the pool can ever match is removed before it runs and
+  refused naming its requests and the largest slot; one waiting for a busy slot waits without a
+  deadline, logged every 30 seconds, and its ``timeout_s`` counts from its start. A run's service jobs
+  are submitted before its pilots, a later plan's wait with the runner's queued pilots held, and
+  ``runner.close()`` waits for a server still waiting for its slot; Ctrl-C ends the wait and removes
+  the run's jobs. See :doc:`htcondor`.
+* Histograms on histserv servers (``graphed_histogram.histserv``) run on every runner here: their
+  servers are services the runner starts beside the driver or as cluster jobs sized to them, and the
+  value holds the histograms read back from them. See :doc:`htcondor`.
 * A driverless run's ``extra_submit`` reaches the pilot jobs its driver job submits
   (``pilots="condor"``) as well as the driver job and its service nodes, as ``htcondor_runner``'s
   reaches its pilots.
@@ -74,6 +87,9 @@ An H→γγ analysis on graphed
   and a new CI job checks it against the original script (:doc:`hgg`). It needs graphed's
   multi-output plans (``aggregate_plan(writes=)``, ``collate``, ``parquet_write``), which CI
   installs from git until a graphed release carries them.
+* Its value holds seven diphoton diagnostics per dataset (``analysis.DIAGNOSTICS``), filled locally or,
+  with ``plan(..., context=)``, on histserv servers; ``run_local.py`` saves them as UHI JSON, and
+  ``run_lpc.py`` runs the analysis at the LPC from the HiggsDNA sample manifests (:doc:`hgg`).
 
 0.0.4
 -----

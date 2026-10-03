@@ -694,7 +694,8 @@ def test_host_service_forgets_its_announce_secret_when_construction_refuses(
         minted = keys_of(events, "announce_secret")
         assert len(minted) == 1 and minted[0].startswith("scope1-"), events
         assert keys_of(events, "forget_announce") == minted
-        assert len(submits(schedd.log)) == 1, "a service job was submitted for a refused input"
+        services = [d for d in submits(schedd.log) if str(d["JobBatchName"]).startswith("graphed-service-")]
+        assert services == [], "a service job was submitted for a refused input"
     finally:
         close_backend(backend, schedd)
 
@@ -764,8 +765,7 @@ def test_host_service_returns_the_announced_endpoint_and_releases_in_order(
         announce_hex = (found / "graphed-secret").read_text().strip()
         pilot_hex = (log_dir / "graphed-secret").read_text().strip()
         assert announce_hex != pilot_hex, "the service job carries the pilots' secret"
-        pilot_desc, service_desc = submits(schedd.log)[:2]
-        assert cfg["url"] == pilot_desc["arguments"].split()[0]
+        (service_desc,) = submits(schedd.log)
         leaked = [k for k, v in service_desc.items() if announce_hex in str(v) or pilot_hex in str(v)]
         assert leaked == [], leaked
         body = announce_body(key, "wn9.example:10042", "wn9.example")
@@ -799,13 +799,13 @@ FAILURES = {
         RuntimeError,
         [r"JobStatus\W*5\b", r"HoldReasonCode\W*13\b", r"Transfer input files failure \(injected\)"],
     ),
-    "idle": ([[{"JobStatus": 1}]], [], 1.5, TimeoutError, [r"1\.5", r"JobStatus\W*1\b"]),
+    "idle": ([[{"JobStatus": 1}], [{"JobStatus": 2}]], [], 1.5, TimeoutError, [r"1\.5", r"JobStatus\W*2\b"]),
     "spooling": (
-        [[{"JobStatus": 5, "HoldReasonCode": 16}]],
+        [[{"JobStatus": 5, "HoldReasonCode": 16}], [{"JobStatus": 2}]],
         [],
         1.5,
         TimeoutError,
-        [r"1\.5", r"JobStatus\W*5\b"],
+        [r"1\.5", r"JobStatus\W*2\b"],
     ),
 }
 
@@ -818,14 +818,27 @@ def test_host_service_fails_a_gone_held_or_late_job_and_forgets_its_key(
     events = spy_registry(monkeypatch)
     monkeypatch.setattr(server_api(), "POLL_S", 0.5)
     schedd = RecordingSchedd(queue=queue, history=history)
+    running: list[float] = []
+    answer = schedd.query
+
+    def query(*args: Any, **kwargs: Any) -> list[Any]:
+        ads = answer(*args, **kwargs)
+        if not running and any(ad.get("JobStatus") == 2 for ad in ads):
+            running.append(time.monotonic())
+        return ads
+
+    monkeypatch.setattr(schedd, "query", query)
     backend, _, _ = condor_backend(monkeypatch, tmp_path, schedd=schedd)
     mark = len(schedd.log)
     try:
         with pytest.raises(error) as failed:
             run_bounded(lambda: backend.host_service(web_spec(timeout_s=timeout_s), "scope1"), BOUND_S)
+        raised = time.monotonic()
         text = str(failed.value)
         missing = [p for p in named if not re.search(p, text)]
         assert missing == [], (missing, text)
+        if error is TimeoutError:
+            assert running and raised - running[0] >= timeout_s, (running, raised)
         (key,) = keys_of(events, "announce_secret")
         assert keys_of(events, "forget_announce") == [key]
         if error is RuntimeError:

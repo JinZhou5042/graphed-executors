@@ -5,12 +5,15 @@ H→γγ inclusive base processor, to graphed. It reads coffea NanoEvents in `mo
 `NanoAODSchema`, applies the same selections, and writes the same flat diphoton parquet, one part
 per chunk, with the original's columns and key-value metadata. One plan covers a whole fileset, MC
 and data together, and its value is the original's counters summed per dataset
-`{dataset: {nTot, nPos, nNeg, nEff, genWeightSum}}`, as coffea's Runner accumulates them.
+`{dataset: {nTot, nPos, nNeg, nEff, genWeightSum}}`, as coffea's Runner accumulates them, each beside
+its `"diagnostics"`: the seven diphoton histograms of `analysis.DIAGNOSTICS`, filled locally or, with a
+`graphed_histogram.histserv.Context`, on histserv servers the runner starts.
 
 | File | What it is |
 |---|---|
-| `analysis.py` | the processor, `plan(fileset, *, year, out)`, `dataset_plan(dataset, files, *, year, out)`, `lumi_mask(run, lumi, year)` |
-| `run_local.py` | run files of one dataset on this machine, in-process or on a thread pool, and print the counters |
+| `analysis.py` | the processor, `plan(fileset, *, year, out, context=None)`, `dataset_plan(dataset, files, *, year, out, context=None)`, `lumi_mask(run, lumi, year)`, `DIAGNOSTICS` |
+| `run_local.py` | run files of one dataset on this machine, in-process or on a thread pool, print the counters and save the diagnostics as UHI JSON |
+| `run_lpc.py` | run the HiggsDNA manifests' first files at the LPC, the diagnostics on histserv servers (`docs/htcondor.rst`, "An H→γγ run"); not run in CI |
 | `validate_real.py` | run the original on ranges of a real 2024 MC file and a real 2024 data file, and one graphed plan over both, and compare every part and both datasets' counters |
 
 ## Running it
@@ -35,7 +38,7 @@ fileset = {
     "DataC_2024": {data_uri: {"object_path": "Events", "steps": steps}},
 }
 plan = analysis.plan(fileset, year="2024", out="out")
-value = SequentialRunner().run(plan).value   # {"MC": {...}, "DataC_2024": {...}}
+value = SequentialRunner().run(plan).value   # {"MC": {..., "diagnostics": {...}}, "DataC_2024": {...}}
 ```
 
 Data and MC record different graphs; `graphed.collate` runs both in the one plan. `plan` over one

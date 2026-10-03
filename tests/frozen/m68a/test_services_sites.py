@@ -370,7 +370,9 @@ def test_a_failed_spool_leaves_no_cluster_and_no_port(
     port = closed_port()
     with pytest.raises(RuntimeError, match="spool"):
         run_bounded(
-            lambda: backend_api().HTCondorBackend(pilots, 2, host="127.0.0.1", port_range=(port, port)),
+            lambda: backend_api().HTCondorBackend(
+                pilots, 2, host="127.0.0.1", port_range=(port, port), service_hosts=("driver",)
+            ),
             BOUND_S,
         )
     assert [e for e in schedd.log if e[0] == "submit"], schedd.log

@@ -74,7 +74,7 @@ an `(n_events, n_features)` matrix, which a rank-1 input would reject.
 | `…::test_a_managed_endpoint_is_minted_with_the_check_scheme[*]`, `…::test_python_is_rendered_as_the_driver_interpreter` | D2 minted scheme; §3.1 `{python}` = `sys.executable` |
 | `…::test_an_attached_backend_names_the_host_condor_writes_as_machine` | D2 `backend.host_identity` = `FULL_HOSTNAME` |
 | `…::test_the_lpc_driver_job_backend_reads_its_own_row`, `…::test_the_lxplus_driver_job_hosts_a_service_beside_the_driver` | §3.1 htcondor bullet `in_job=`; row 3 (through `driver._runner`, no bindings) |
-| `…::test_a_failed_second_pilot_spawn_leaves_no_pilot_and_no_port`, `…::test_a_failed_spool_leaves_no_cluster_and_no_port`, `…::test_a_failed_runner_in_the_driver_leaves_no_pilot_and_no_port` | §3.1 htcondor bullet (the m66 acquirers); `probes/class/probe_acquire_record.py` |
+| `…::test_a_failed_second_pilot_spawn_leaves_no_pilot_and_no_port`, `…::test_a_failed_spool_leaves_no_cluster_and_no_port`, `…::test_a_failed_runner_in_the_driver_leaves_no_pilot_and_no_port` | §3.1 htcondor bullet (the m66 acquirers); `probes/class/probe_acquire_record.py`. The failed-spool backend is narrowed to `service_hosts=("driver",)`, so its pilots are still submitted at construction (§5.2 "Ordering", `freeze-m68a-fixup2`); the deferred spool is m69b's |
 | `…::test_close_frees_the_task_server_port_when_the_launcher_stop_raises` | `probes/class/probe_phase_and_release_r14.py` B |
 | `test_triton_service_ref.py::*` | D7 through the engine; row 4; E2 (a TCP listener passing the spec's `tcp` check) |
 | `test_driverless_endpoints.py::test_the_driver_job_hosts_the_service_and_resolves_the_value` | §3.1 Driverless endpoints; row 5 main leg |

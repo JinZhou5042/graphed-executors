@@ -28,7 +28,16 @@ from graphed.services import ServiceSpec, split_endpoint
 
 from . import launch
 from .backend import _require_plan_importable
-from .launch import ENV_FILE, LOG_FILE, PLAN_FILE, RESULT_FILE, RUN_FILE, CondorPilots, collectors
+from .launch import (
+    ENV_FILE,
+    LOG_FILE,
+    PLAN_FILE,
+    RESULT_FILE,
+    RUN_FILE,
+    CondorPilots,
+    CondorReason,
+    collectors,
+)
 from .services import ServiceJob
 from .sites import SITES, SiteProfile, counts_as_alive
 
@@ -155,7 +164,9 @@ class RunHandle:
     def remove(self) -> None:
         htc, schedd = self._located()
         schedd.act(
-            htc.JobAction.Remove, f"ClusterId == {self.cluster}", reason="graphed: driverless run removed"
+            htc.JobAction.Remove,
+            f"ClusterId == {self.cluster}",
+            reason=CondorReason("graphed: driverless run removed"),
         )
 
     def logs(self) -> dict[str, str]:

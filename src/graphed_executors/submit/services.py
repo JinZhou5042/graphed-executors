@@ -6,10 +6,15 @@ A plan's ``services`` are graphed ``ServiceSpec`` requirements; the engine names
 and a failing one refuses the run naming it (an explicit instruction is never silently replaced); (2)
 the backend's site endpoint for the spec's ``kind`` (``backend.site_services``, duck-typed), checked, a
 failing one passed over with the reason kept in the status; (3) a managed start from the spec's
-``launch`` recipe: beside the driver (a stdlib ``Popen``) when the recipe has no image and no GPUs and
-the backend offers ``"driver"`` in ``service_hosts``, else on the cluster through the backend's
+``launch`` recipe: beside the driver (a stdlib ``Popen``) when the recipe has no image and no GPUs, the
+backend offers ``"driver"`` in ``service_hosts``, and the driver holds it (the ``resources["memory_mb"]``
+of the set's services beside the driver, this one included, sum to no more than the backend's
+``driver_memory_mb``, else the host's physical memory), else on the cluster through the backend's
 ``host_service``/``release_service`` pair (D10: the capability IS the pair of methods). Nothing left
-raises :class:`ServiceUnavailable` naming each leg and why it did not apply.
+raises :class:`ServiceUnavailable` naming each leg and why it did not apply. The resolving runs inside
+the backend's ``starting_services()`` context when it has one, a backend that holds its workers back
+while a plan's services start, and the resolving and the probe inside its ``starting_service_set()``
+context, a backend that starts one set at a time.
 
 Readiness is :func:`check_ready`, one function every caller runs: where the service runs, then from a
 worker. The worker probe is an ordinary ``backend.submit`` of :func:`_probe_services`, one task that
@@ -58,6 +63,7 @@ _GRACE_S = 5.0  # a terminated managed service's time to exit before it is kille
 _HEALTH_METHOD = "/grpc.health.v1.Health/Check"
 _SERVING = b"\x08\x01"  # HealthCheckResponse{status: SERVING}, protobuf-encoded
 _MINTED_SCHEME = {"http": "http", "grpc": "grpc", "tcp": "tcp"}
+_MIB = 1 << 20
 
 # One port space per process: a scan frees the port it found before the child binds it, so two
 # managed starts in this process hold this lock from the scan until readiness (or failure).
@@ -147,18 +153,50 @@ class Endpoints(Mapping[str, str]):
 # ---- host identity and readiness -----------------------------------------------------------------
 
 
-def host_identity() -> str:
-    """This host as the pool names it: ``Machine`` from the ad file ``$_CONDOR_MACHINE_AD`` names (a
-    container's own hostname is not the execute node's, and no bindings are needed to read it), else
-    ``socket.getfqdn()``."""
+def machine_ad(attr: str) -> str | None:
+    """``attr`` of the ad file ``$_CONDOR_MACHINE_AD`` names (string quotes dropped), read without the
+    bindings; ``None`` outside a job or when the ad has no such line."""
     path = os.environ.get("_CONDOR_MACHINE_AD")
     if path and os.path.isfile(path):
         with open(path) as ad:
             for line in ad:
                 name, _, value = line.partition("=")
-                if name.strip() == "Machine":
+                if name.strip() == attr:
                     return value.strip().strip('"')
-    return socket.getfqdn()
+    return None
+
+
+def host_identity() -> str:
+    """This host as the pool names it: ``Machine`` from ``$_CONDOR_MACHINE_AD`` (a container's own
+    hostname is not the execute node's), else ``socket.getfqdn()``."""
+    return machine_ad("Machine") or socket.getfqdn()
+
+
+def physical_memory_mb() -> int:
+    """This host's physical memory in MiB: ``GlobalMemoryStatusEx`` on Windows, ``os.sysconf`` pages
+    elsewhere."""
+    if sys.platform == "win32":
+        import ctypes  # noqa: PLC0415  (Windows only)
+
+        class _MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_uint32),  # DWORD
+                ("dwMemoryLoad", ctypes.c_uint32),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            raise ctypes.WinError()
+        return int(status.ullTotalPhys) // _MIB
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // _MIB
 
 
 def minted_endpoint(check: str, host: str, port: int) -> str:
@@ -362,6 +400,7 @@ class ServiceSet:
         self._stack: contextlib.ExitStack | None = None
         self._statuses: list[ServiceStatus] = []
         self._driver: str | None = None
+        self._driver_mb = 0  # what this set's services beside the driver hold
 
     def __enter__(self) -> Endpoints:
         return self.start()
@@ -377,10 +416,13 @@ class ServiceSet:
         if self._stack is not None:
             raise RuntimeError("this service set is already started")
         self._statuses = []
+        self._driver_mb = 0
         with contextlib.ExitStack() as stack:
             stack.callback(self._stamp_closed)
-            resolved = [self._resolve(spec, stack) for spec in self.specs]
-            self._probe(resolved, stack)
+            with getattr(self.backend, "starting_service_set", contextlib.nullcontext)():
+                with getattr(self.backend, "starting_services", contextlib.nullcontext)():
+                    resolved = [self._resolve(spec, stack) for spec in self.specs]
+                self._probe(resolved, stack)  # outside the phase: it needs a worker
             self._stack = stack.pop_all()
         return Endpoints({r.spec.name: r.status.endpoint for r in resolved}, self._on_close)
 
@@ -418,10 +460,20 @@ class ServiceSet:
         if launch is None:
             raise ServiceUnavailable(spec.name, {**legs, "managed": "the spec has no launch recipe"})
         hosts = tuple(getattr(self.backend, "service_hosts", ("driver",)))
-        if launch.image is None and not launch.resources.get("gpus", 0) and "driver" in hosts:
-            return self._on_driver(spec, legs, detail, stack)
         host_service = getattr(self.backend, "host_service", None)
-        if not callable(host_service):
+        if launch.image is None and not launch.resources.get("gpus", 0) and "driver" in hosts:
+            size = int(launch.resources.get("memory_mb", 0))
+            too_big = self._driver_refusal(size)
+            if too_big is None:
+                resolved = self._on_driver(spec, legs, detail, stack)
+                self._driver_mb += size
+                return resolved
+            # only a cluster host takes what the driver cannot hold
+            if not callable(host_service) or "cluster" not in hosts:
+                raise ServiceUnavailable(spec.name, {**legs, "managed": too_big})
+            legs["driver"] = too_big
+            detail = "; ".join(f"{leg}: {why}" for leg, why in legs.items())
+        elif not callable(host_service):
             where = "an image or GPUs" if "driver" in hosts else f"service_hosts={hosts!r}"
             raise ServiceUnavailable(
                 spec.name,
@@ -432,9 +484,28 @@ class ServiceSet:
                 },
             )
         started = time.time()
-        endpoint, identity, key = host_service(spec, self.scope)
+        try:
+            endpoint, identity, key = host_service(spec, self.scope)
+        except ServiceUnavailable as exc:  # the backend's refusal, beside why the earlier legs failed
+            raise ServiceUnavailable(spec.name, {**legs, **exc.legs}) from exc
         stack.callback(release_quietly, f"service {spec.name!r} ({key})", self.backend.release_service, key)
         return self._record(spec, "managed", "cluster", endpoint, identity, started, detail)
+
+    def _driver_refusal(self, size: int) -> str | None:
+        """Why ``size`` MiB more beside the driver does not fit, or ``None`` when it does: the set's
+        services there, this one included, must sum to no more than ``backend.driver_memory_mb``
+        (duck-typed), else the host's physical memory."""
+        limit = getattr(self.backend, "driver_memory_mb", None)
+        source = "the backend's driver_memory_mb"
+        if limit is None:
+            limit, source = physical_memory_mb(), "the driver host's physical memory"
+        total = self._driver_mb + size
+        if total <= limit:
+            return None
+        return (
+            f"its {size} MiB would bring the services beside the driver to {total} MiB, "
+            f"above {source} of {limit} MiB"
+        )
 
     def _on_driver(
         self, spec: ServiceSpec, legs: dict[str, str], detail: str, stack: contextlib.ExitStack
@@ -560,6 +631,8 @@ __all__ = [
     "ServiceUnreachable",
     "check_ready",
     "host_identity",
+    "machine_ad",
     "minted_endpoint",
+    "physical_memory_mb",
     "release_quietly",
 ]

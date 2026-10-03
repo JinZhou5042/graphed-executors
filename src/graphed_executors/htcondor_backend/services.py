@@ -16,6 +16,8 @@ import json
 import os
 import shlex
 import shutil
+import threading
+from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -24,11 +26,12 @@ from graphed.services import ServiceSpec
 
 from . import launch
 from . import server as _server
-from .launch import ENV_FILE, SECRET_FILE, CondorPilots, write_secret
+from .launch import ENV_FILE, SECRET_FILE, SLOT_RESOURCES, CondorPilots, write_secret
 
 ANNOUNCE_SOURCE = Path(__file__).with_name("announce.py")
 RUN_DIR = "service"
 AD_ATTRS = ["JobStatus", "ExitCode", "HoldReasonCode", "HoldReason"]
+_REQUESTS = ("RequestMemory", "RequestCpus", "RequestGPUs")
 VACATE_S = 30  # a removed service frees its slot (and GPU) this soon, whatever the EP's own vacate time
 
 
@@ -67,6 +70,8 @@ class ServiceJob:
         self.dir: Path | None = None
         self.cluster: int | None = None
         self._stack = ExitStack()
+        self._lock = threading.Lock()  # one submit or stop at a time: a stop waits for a submit in flight
+        self._stopped = False
 
     def files(self, dir: Path) -> dict[str, str]:
         """Write the job's files into ``dir`` and return its submit keys; submits nothing."""
@@ -132,7 +137,7 @@ class ServiceJob:
     def submit(self) -> None:
         """Write the files into a new ``service-<key>/`` under the launcher's ``log_dir`` and submit one
         job; its removal is registered the moment ``schedd.submit`` returns, so a failed spool leaves
-        none."""
+        none. A job already stopped is not submitted."""
         launcher = self.launcher
         assert launcher._schedd is not None and launcher.log_dir is not None, (
             "start the launcher before a service job: it submits to the pilots' schedd"
@@ -141,7 +146,9 @@ class ServiceJob:
         self.dir.mkdir()  # the key is per call: no call reuses another's directory
         desc = self.files(self.dir)
         htc = launch._htcondor()
-        with ExitStack() as stack:
+        with self._lock, ExitStack() as stack:
+            if self._stopped:
+                raise RuntimeError(f"service job {self.key} was stopped before it was submitted")
             result = launcher._submit(htc, launcher._schedd, desc, 1, stack)
             self.cluster = int(result.cluster())
             self._stack = stack.pop_all()
@@ -154,12 +161,92 @@ class ServiceJob:
             ads = list(schedd.history(constraint, AD_ATTRS, match=1))
         return ads[0] if ads else {}
 
+    def match_refusal(
+        self, machines: list[Any], claims: Mapping[str, Sequence[Any]] | None = None
+    ) -> str | None:
+        """Why no slot of ``machines`` could ever run this queued job, else ``None``: its whole ad (the
+        request, the site's and the user's submit keys) must ``symmetricMatch`` a slot's ad whose free
+        ``Memory``/``Cpus``/``GPUs``/``Disk`` are a partitionable slot's totals, so a busy pool still
+        matches, less what ``claims`` hold there (by holder, the running ads of the runner's pilots and
+        of the set's earlier servers, which keep their slots to the run's end); ``None`` when
+        ``machines`` is empty."""
+        if not machines:  # a collector that lists no slot says nothing about the pool: submit and wait
+            return None
+        assert self.cluster is not None, "matched only once submitted"
+        ads = list(self.launcher._schedd.query(constraint=f"ClusterId == {self.cluster}"))
+        if not ads:  # it already left the queue: the announce wait reports how
+            return None
+        import classad2  # noqa: PLC0415  (ships with the htcondor2 bindings)
+
+        slots = [_as_whole(classad2.ClassAd(str(machine))) for machine in machines]
+        held = {who: running for who, running in (claims or {}).items() if running}
+        for running in held.values():
+            for claim in running:
+                _less_claim(slots, claim)
+        if any(ads[0].symmetricMatch(slot) for slot in slots):
+            return None
+        asked = ", ".join(f"{a}={ads[0].eval(a) if a in ads[0] else 0}" for a in _REQUESTS)
+        largest = max(int(slot.get("Memory", 0)) for slot in slots)
+        if held:
+            return (
+                f"service job {self.key} matches no slot of the pool beside {' and '.join(held)}, which keep "
+                f"their slots until the run ends: {asked}; the largest slot memory beside them is {largest} MiB"
+            )
+        return (
+            f"service job {self.key} matches no slot of the pool, busy or not: {asked}; "
+            f"the largest slot memory is {largest} MiB"
+        )
+
     def stop(self) -> None:
         """Remove the job at once (a service never exits by itself; a spooled job that completed is
-        retrieved first, so its ``service.out``/``.err`` come back), then drop its secret file."""
-        self._stack.close()
-        if self.dir is not None:
-            (self.dir / SECRET_FILE).unlink(missing_ok=True)
+        retrieved first, so its ``service.out``/``.err`` come back), then drop its secret file. Calls
+        from any threads are serialized and only the first does that: each returns once it has run."""
+        with self._lock:
+            if self._stopped:  # Windows refuses an unlink racing another one: access denied
+                return
+            self._stopped = True
+            self._stack.close()
+            if self.dir is not None:
+                (self.dir / SECRET_FILE).unlink(missing_ok=True)
+
+
+def machine_ads(launcher: CondorPilots) -> list[Any]:
+    """The pool's slot ads, dynamic slots dropped, from the collector of ``launcher``'s schedd
+    (``schedd_locate``'s pool, else the default collector)."""
+    htc = launch._htcondor()
+    locate = launcher.schedd_locate
+    collector = htc.Collector(locate[0]) if locate is not None else htc.Collector()
+    return [ad for ad in collector.query(constraint='MyType == "Machine"') if ad.get("SlotType") != "Dynamic"]
+
+
+def _as_whole(slot: Any) -> Any:
+    """``slot`` (a copy) as it would be with nothing running: a partitionable slot's totals as its free
+    resources."""
+    if slot.get("PartitionableSlot"):
+        for total, free in (
+            ("TotalSlotMemory", "Memory"),
+            ("TotalSlotCpus", "Cpus"),
+            ("TotalSlotGPUs", "GPUs"),
+            ("TotalSlotDisk", "Disk"),
+        ):
+            if total in slot:
+                slot[free] = slot[total]
+    return slot
+
+
+def _less_claim(slots: list[Any], claim: Any) -> None:
+    """Take a running job's share (``<r>Provisioned``, else ``Request<r>`` evaluated in its ad) out of
+    the slot it runs in: ``RemoteHost`` names its dynamic slot ``slotN_M@host``, whose parent is
+    ``slotN@host``, or a static slot itself."""
+    remote = str(claim.get("RemoteHost", ""))
+    name, at, host = remote.partition("@")
+    parent = name.rsplit("_", 1)[0] + at + host
+    for slot in slots:
+        if slot.get("Name") in (remote, parent):
+            for r in SLOT_RESOURCES:
+                held = next((a for a in (f"{r}Provisioned", f"Request{r}") if a in claim), None)
+                if r in slot and held is not None:
+                    slot[r] = int(slot[r]) - int(claim.eval(held))  # RequestDisk is an expression
 
 
 def _checked_inputs(inputs: tuple[str, ...]) -> list[str]:
@@ -204,4 +291,4 @@ def _mirror(inputs: list[str], dest: Path) -> None:
                 os.symlink(os.path.join(root, name), here / name)
 
 
-__all__ = ["ServiceJob"]
+__all__ = ["ServiceJob", "machine_ads"]

@@ -392,10 +392,13 @@ this (``"cluster"`` is in ``service_hosts`` wherever ``worker_ports`` is set). T
 standard-library script (Python 3.9 or later, so it runs in an image with no venv) that takes the
 first free port of the site's ``worker_ports``, starts the recipe's command on it, runs the spec's
 check there, and then *announces* ``host:port`` to the runner's task server, signed with a secret
-made for that one service. The runner waits up to the spec's ``timeout_s`` for the announce. A job
-that ends or is held first raises ``RuntimeError`` naming its state and its directory
-``service-<key>/`` under ``log_dir``; a job that has not announced by then raises ``TimeoutError``;
-either way the job is removed. When the run ends the job is removed too, and leaves its slot (and its
+made for that one service. While the job waits for a slot (idle, or spooling its inputs) the runner
+waits with it, with no deadline (`Schedulability`_), and logs the job's key and
+state on the ``graphed_executors`` logger at first and every 30 seconds; the spec's ``timeout_s``
+counts from the job's start (its first ``JobStatus == 2``), and an eviction back to idle does not
+restart it. A job that ends or is held first raises ``RuntimeError`` naming its state and its
+directory ``service-<key>/`` under ``log_dir``; a job that has started and not announced within
+``timeout_s`` raises ``TimeoutError``; either way the job is removed. When the run ends the job is removed too, and leaves its slot (and its
 GPU) within 30 seconds. On a spooled site (the LPC, lxplus) a service job that completed has its
 ``service.out`` and ``service.err`` fetched into ``service-<key>/`` when it is removed.
 
@@ -463,6 +466,127 @@ reached from CPU pilots:
                                request_memory_mb=4000, log_dir=os.getcwd())   # one SERVICE node
 
 
+Schedulability
+~~~~~~~~~~~~~~
+
+A service starts only where it can run: a run that cannot place one anywhere is refused before any
+of its work starts. A run whose service can run on some slot waits for one, with no deadline, for as
+long as other jobs hold the room; while it waits, the ``graphed_executors`` logger names the job's key
+and state every 30 seconds. The runner's queued pilots never take that room:
+
+* **A run's service jobs go before its pilots.** A runner whose services are jobs submits its pilots
+  at the first need of a worker (a task, ``n_workers()`` or ``wait_for_pilots()``, from any plan);
+  a need that comes while a plan's services are starting is put off until they have all started (or
+  one failed), so the pilots queue for the room beside them. A driver job's pilots likewise follow its
+  ``SERVICE`` nodes' announces. That first need waits up to ten minutes for ``min_pilots``, counted
+  from the pilots' submit.
+* **A later plan's servers wait with the runner's queued pilots held**, across all of that plan's
+  services, and the pilots are released once those services have started or failed; a hold you
+  placed yourself is left alone.
+* **One plan's services start at a time.** Plans of one runner overlap (a ``submit`` beside a
+  ``run``, or ``run`` from two threads), but their service sets start one after another, each through
+  its worker probe, so no plan's server waits for room that another plan still starting holds. A plan
+  waiting its turn raises ``RuntimeError`` naming the close once the runner closes or stops waiting.
+* **Closing.** ``runner.close()``, or leaving the ``with`` block normally, waits for every submitted
+  plan, a server still waiting for its slot included. Ctrl-C anywhere (in the ``with`` block, or in
+  ``close()`` itself) ends the wait and removes the run's jobs, its servers and its pilots. Any other
+  exception leaving the ``with`` block ends the wait too: the job is removed and the plan raises
+  ``RuntimeError`` naming its key. From then on no pilot is submitted, and a wait for pilots that
+  were never submitted raises naming the close; held pilots are still released for the plans the
+  close still finishes.
+
+* **Where it may go.** ``htcondor_runner(..., service_hosts=("cluster",))`` (or ``("driver",)``)
+  narrows the site's ``service_hosts`` for this run. A host the site does not offer is a
+  ``ValueError`` naming the ones it does, before any pilot is submitted; a driver job offers only
+  ``("driver",)``.
+* **Beside the driver, it must fit.** A recipe's ``resources["memory_mb"]`` (none counts as 0),
+  summed over the run's services beside the driver, must fit ``backend.driver_memory_mb`` if the
+  backend sets it, else the driver host's physical memory. Inside a driver job,
+  ``HTCondorBackend.driver_memory_mb`` is the slot's ``Memory``, since the services share the job's
+  slot. A service that does not fit goes to the cluster, its status ``detail`` naming the sizes; a
+  backend with no cluster host refuses it with ``ServiceUnavailable``, whose ``legs["managed"]`` names
+  the sizes and the limit.
+* **On the cluster, a slot must match.** After the service job is submitted, its ad is matched against
+  every slot of the pool, busy or not, with a partitionable slot counted whole (its total memory, CPUs,
+  GPUs and disk) less what the runner's running pilots and the run's earlier servers hold there: the
+  pilots keep their slots until the runner closes, the servers until the run ends. A server that would
+  fit only where they sit is removed before it runs, and the run raises ``ServiceUnavailable`` naming
+  their clusters. A job no slot matches (too much memory, a requirement no machine meets) is removed
+  before it ever runs, and the run raises ``ServiceUnavailable`` naming ``RequestMemory``,
+  ``RequestCpus``, ``RequestGPUs`` and the largest slot's memory. A job that matches a busy slot waits
+  for it, as above. A collector that lists no slot at all is not asked: the job is submitted and waits.
+
+Histograms on histserv servers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``graphed_histogram.histserv`` fills histograms on `histserv <https://pypi.org/project/histserv/>`__
+servers instead of shipping each task's partial histograms through the reduction. A ``Context`` sizes
+the histograms and packs them onto servers of the sizes you offer; each server is a service in
+``plan.services``, with its size as ``resources["memory_mb"]``. The runner then starts, checks, binds
+and stops them as it does any service, and resolves the histograms out of the servers while they are
+up, so the value holds plain ``boost_histogram.Histogram`` objects. Install the
+``graphed-histogram[histserv]`` extra; histserv needs ``grpcio``, which has no free-threaded wheel.
+
+.. code-block:: python
+
+    import awkward as ak
+    import boost_histogram as bh
+    import graphed_histogram as gh
+    from graphed import Session
+    from graphed.awkward import AwkwardBackend, from_parquet
+    from graphed_histogram import histserv
+    from graphed_executors.submit import SubmitRunner, ThreadBackend
+
+    ak.to_parquet(ak.Array({"x": [0.5, 1.5, 2.5, 3.5] * 100}), "x.parquet")
+    events = from_parquet(Session(AwkwardBackend()), "events", "x.parquet", steps_per_file=4)
+    ctx = histserv.Context(memory_mb=512, workers=2, name="docs-htcondor")
+    h = histserv.Histogram(bh.axis.Regular(4, 0.0, 4.0), context=ctx)
+    h.fill(events.x)
+    plan = gh.plan({"x": h}, steps_per_file=4)
+    print([(spec.name, dict(spec.launch.resources)) for spec in plan.services])
+
+    with SubmitRunner(ThreadBackend(2)) as runner:
+        print(runner.run(plan).value["x"].values())
+
+Printed output::
+
+    [('docs-htcondor-0', {'memory_mb': 512})]
+    [100. 100. 100. 100.]
+
+``workers`` is the number of tasks that fill at once (here the two threads; on a pool, the pilots).
+On a pool the server runs beside the driver when it fits there and the site lets workers reach the
+driver, else as a job of its own sized to the server (`Cluster-hosted services`_). Pass
+``service_hosts=("cluster",)`` to keep servers off a login node, or ``("driver",)`` to keep them on
+it. A driverless run's servers run inside the driver job, so ``request_memory_mb`` must cover them
+as well as the driver and its local pilots.
+
+An H→γγ run
+~~~~~~~~~~~
+
+``examples/hgg/run_lpc.py`` runs the H→γγ example (:doc:`hgg`) at the LPC over the HiggsDNA 2024
+sample manifests (``{dataset: [file, ...]}`` JSON), with its diagnostics on histserv servers. From a
+login node, with a proxy and a venv that holds this package's ``[htcondor]`` extra,
+``graphed-histogram[histserv]``, the coffea fork and ``higgs_dna``:
+
+.. code-block:: bash
+
+    python examples/hgg/run_lpc.py samples_2024_mc.json samples_2024_data.json --files 2 --parts 4 \
+        --pilots 8 --server-mb 512 --env "$VIRTUAL_ENV"
+
+It takes each dataset's first ``--files`` files (``GluGluHto2G_M-125_amcatnlo_2024`` and
+``DataC_2024`` unless ``--datasets`` names others), splits each into ``--parts`` entry ranges, and
+writes the parquet parts to ``--out``, by default ``root://cmseos.fnal.gov//store/user/<you>/hgg/``,
+which the pilots write over xrootd with the job's proxy: graphed opens an ``--out`` holding ``://``
+through fsspec, so a ``root://`` one needs fsspec-xrootd beside the analysis (the coffea image has it).
+It prints the servers the context opened,
+logs each server's status (where it ran, when it was submitted and ready), prints the counters, and
+saves the diagnostics as UHI JSON (``--histograms``, ``hgg_diagnostics.json`` by default; read them
+back with ``json.load(f, object_hook=uhi.io.json.object_hook)`` and ``boost_histogram.Histogram``).
+``--placement cluster`` (the default) runs each server as a job of its own; ``--placement driver``
+runs them on the login node. ``--driverless`` submits the whole run as one job whose slot holds the
+driver, the ``--pilots`` local pilots and the servers, and asks for memory for all of them.
+
+
 The arguments you will change
 -----------------------------
 
@@ -496,9 +620,13 @@ The arguments you will change
        default the site's ``driver_ports``: 10000–10100 on ``lpc`` and ``generic``, 8786 on
        ``lxplus``. A range with no free port is an ``OSError`` naming the site and the range.
    * - ``min_pilots``
-     - How many pilots must be connected before the first run starts; 1 by default.
+     - How many pilots must be connected when a run first needs a worker (its first task, or the
+       check of its services from a worker); 1 by default.
    * - ``retries``
      - Has no effect here. The only retry is the one re-run of a task whose pilot was lost.
+   * - ``service_hosts``
+     - Where services the runner starts may run: a subset of the site's ``("driver", "cluster")``
+       (`Schedulability`_).
 
 
 Temporary space on the worker

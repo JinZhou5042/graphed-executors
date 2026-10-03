@@ -9,8 +9,9 @@ The profile is a copy of ``generic`` with ``service_ports=None``, so ``service_h
 the generic ``recipes.http_server`` (``inputs=()``, serving the empty ``service/``) is hosted on the
 cluster. (a) its announce carries the pool host's ``Machine``, every probe answer carries it, a pilot task
 GETs it, and each run's end removes its own service cluster, which history then orders against a task's
-clock; (b) a GPU request no slot matches times out and a child that exits at once fails before
-``timeout_s``, each job gone from the queue afterwards and its announce key forgotten.
+clock; (b) a GPU request no slot can ever match is refused before it runs, naming the request and the largest
+slot memory, and a child that exits at once fails before ``timeout_s``, each job gone from the queue
+afterwards and its announce key forgotten.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from m68b_harness import (
     run_bounded,
     server_api,
     service_plan,
+    services_api,
     spy_method,
     wait_for,
 )
@@ -130,6 +132,17 @@ def queued(schedd: Any, constraint: str) -> list[Any]:
 def history(schedd: Any, constraint: str) -> list[Any]:
     attrs = ["ClusterId", "JobStatus", "JobBatchName", "JobCurrentStartDate", "EnteredCurrentStatus"]
     return list(schedd.history(constraint, attrs, match=10))
+
+
+def largest_slot_mb(htc: Any) -> int:
+    """The pool's largest slot memory: a partitionable slot's ``TotalSlotMemory``, dynamic slots dropped."""
+    attrs = ["Memory", "TotalSlotMemory", "PartitionableSlot", "DynamicSlot"]
+    ads = htc.Collector().query(htc.AdType.Startd, projection=attrs)
+    return max(
+        int(ad["TotalSlotMemory"] if ad.get("PartitionableSlot") else ad["Memory"])
+        for ad in ads
+        if not ad.get("DynamicSlot")
+    )
 
 
 def statuses(records: list[logging.LogRecord]) -> list[Any]:
@@ -245,13 +258,20 @@ def test_a_late_or_dead_service_job_is_removed_and_its_key_forgotten(
         gpus = dataclasses.replace(
             base, launch=dataclasses.replace(base.launch, resources={"gpus": 2}), timeout_s=20.0
         )
-        with pytest.raises(TimeoutError) as late:
+        t0 = int(time.time())
+        with pytest.raises(services_api().ServiceUnavailable) as late:
             run_bounded(lambda: backend.host_service(gpus, "late"), LIVE_S)
         text = str(late.value)
-        assert re.search(r"(?<![\w.])20(\.0+)?(?![\w.])", text) and re.search(r"JobStatus\W*1\b", text), text
-        assert wait_for(lambda: not queued(schedd, batch("late")), GONE_S), (
-            "the timed-out job is still queued"
-        )
+        largest = largest_slot_mb(htc)
+        assert re.search(r"RequestGPUs\W*2\b", text), text
+        assert re.search(rf"(?<![0-9a-f]){largest}(?![0-9a-f])", text), (largest, text)
+        assert wait_for(lambda: not queued(schedd, batch("late")), GONE_S), "the refused job is still queued"
+
+        def starts() -> list[Any]:
+            ads = schedd.history(f"{batch('late')} && QDate >= {t0}", ["NumJobStarts"], match=10)
+            return [ad.get("NumJobStarts", 0) for ad in ads]
+
+        assert wait_for(lambda: starts() == [0], GONE_S), starts()
         assert any(k.startswith("late-") for k in keys_of(events, "forget_announce")), events
 
         dead = ServiceSpec(

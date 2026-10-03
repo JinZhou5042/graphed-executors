@@ -65,7 +65,7 @@ exclude = ["CLAUDE.md", ".graphed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "tests/frozen/m7", "tests/frozen/m10", "tests/frozen/m31", "tests/frozen/m34", "tests/frozen/m37", "tests/frozen/m65"]
+pythonpath = ["src", "tests/frozen/m7", "tests/frozen/m10", "tests/frozen/m31", "tests/frozen/m34", "tests/frozen/m37", "tests/frozen/m65", "tests/frozen/m68a", "tests/frozen/m69a"]
 addopts = "-q"
 
 [tool.coverage.run]
@@ -167,10 +167,11 @@ module = [
 ignore_missing_imports = true
 follow_imports = "skip"
 
-# examples/hgg: coffea, higgs_dna, pyarrow and fsspec ship no type information, and only the test-hgg
-# job installs coffea/higgs_dna/correctionlib; hgg_harness is the frozen m69a harness validate_real.py imports.
+# examples/hgg: coffea, higgs_dna, pyarrow, fsspec and graphed_histogram ship no type information, and only
+# the test-hgg job installs coffea/higgs_dna/correctionlib; hgg_harness is the frozen m69a harness
+# validate_real.py imports.
 [[tool.mypy.overrides]]
-module = ["coffea.*", "higgs_dna.*", "correctionlib.*", "pyarrow.*", "fsspec", "hgg_harness"]
+module = ["coffea.*", "higgs_dna.*", "correctionlib.*", "pyarrow.*", "fsspec", "hgg_harness", "graphed_histogram.*"]
 ignore_missing_imports = true
 
 # cloudpickle ships no type information.
@@ -196,9 +197,10 @@ module = [
 ignore_missing_imports = true
 follow_imports = "skip"
 
-# the htcondor bindings ship Linux wheels only and are imported lazily by the htcondor backend's launcher.
+# the htcondor bindings (and their classad2) ship Linux wheels only and are imported lazily by the
+# htcondor backend.
 [[tool.mypy.overrides]]
-module = ["htcondor2", "htcondor2.*"]
+module = ["htcondor2", "htcondor2.*", "classad2"]
 ignore_missing_imports = true
 follow_imports = "skip"
 
