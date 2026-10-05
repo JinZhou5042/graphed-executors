@@ -116,6 +116,35 @@ dask-jobqueue, or a parsl provider to reach those batch systems.
 
 ### On TaskVine
 
+Build VineGraph in a separate Conda environment. The recipe below is for Linux and requires
+a Rust toolchain to build the pinned Graphed core, matching this repository's CI:
+
+```bash
+conda create -y -n graphed-taskvine-check --override-channels -c conda-forge \
+  --strict-channel-priority python=3.11 gcc_linux-64 gxx_linux-64 make swig \
+  zlib openssl libopenssl-static perl conda-pack packaging cloudpickle \
+  threadpoolctl prometheus_client rich pip
+conda activate graphed-taskvine-check
+unset PYTHONPATH
+export PYTHONNOUSERSITE=1
+
+git clone --branch task-graph --single-branch https://github.com/JinZhou5042/cctools.git cctools-src
+cd cctools-src
+git checkout e9deeb451e54cec60fcc0c95fb77798aeef561ba
+./configure --with-base-dir "$CONDA_PREFIX" --prefix "$CONDA_PREFIX" --without-system-doc
+make -j4
+make install
+python -c "from ndcctools.taskvine.vine_graph import VineGraph, Workflow"
+vine_worker --version
+```
+
+Then, from this `graphed-executors` checkout, install the core and backend:
+
+```bash
+python -m pip install "graphed @ git+https://github.com/graphed-org/graphed@a51bee4ff0b40c33cd68cca593f8a74c11d9f516"
+python -m pip install -e ".[taskvine]"
+```
+
 [`examples/taskvine_basic.py`](examples/taskvine_basic.py) builds a small `Plan` and passes it to
 `TaskVineExecutor.run(plan)`. Run it without a worker first:
 
