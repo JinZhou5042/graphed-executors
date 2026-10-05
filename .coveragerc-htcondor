@@ -1,0 +1,15 @@
+# Coverage for the `test-htcondor` CI job: the main matrix omits `*/htcondor_backend/*`, and this job
+# measures it from the m66, m67, m68a, m68b and m68c suites, including the local pilot and driver subprocesses
+# (parallel + sigterm, as in `.coveragerc-parsl`). m68a adds the engine's service set, which these
+# suites drive through pilots and driver jobs.
+[run]
+branch = true
+parallel = true
+sigterm = true
+source =
+    graphed_executors.htcondor_backend
+    graphed_executors.submit.services
+
+[report]
+fail_under = 90
+show_missing = true

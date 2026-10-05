@@ -79,7 +79,7 @@ not in this package. ``result.value`` is the reduced result — bit-for-bit equa
 run, whatever the worker count and whatever order the tasks finished in — alongside
 ``.n_partitions`` and ``.n_combines``.
 
-Four things that save an afternoon:
+A few things that save an afternoon:
 
 * ``process`` / ``combine`` / ``empty`` are pickled to the workers, so define them at module level
   (a ``functools.partial`` of a module-level function, or a frozen dataclass, is fine too), and
@@ -331,7 +331,7 @@ adds, and what each one actually bounds:
        writes one block per output partition, so this is one side of the transfer count.
    * - ``holder_budget_bytes``
      - How many bytes of produced blocks a worker keeps in memory before spilling them to its
-       local disk. Overflow really does hit disk; the witness reports it as
+       local disk. Overflow really does hit disk; ``.witness`` reports it as
        ``holder_spill_count`` and ``peak_holder_bytes``.
    * - ``fetch_budget_bytes`` / ``disk_budget_bytes``
      - The read side's accounting — see the note below for what these do and don't do.
@@ -346,7 +346,7 @@ adds, and what each one actually bounds:
 
    **What the read budgets actually limit.** ``fetch_budget_bytes`` and ``disk_budget_bytes``
    bound a driver-side accounting pass over block sizes — which is how this engine's counters stay
-   exactly equal to the single-machine engine's — and they are reported in the witness. They do
+   exactly equal to the single-machine engine's — and they are reported in ``.witness``. They do
    **not** throttle a worker while it is pulling: the real gather fetches its fragments, holds one
    output partition resident, concatenates and returns. ``holder_budget_bytes`` on the write side
    *is* a live runtime bound with real spilling. If you are trying to cap memory on a shuffle,
@@ -454,6 +454,90 @@ every event. If you are writing your own backend, the same tap is
 One gap: the worker-to-worker engine's peer-reduction path accepts ``monitor=`` for signature
 parity but does not emit events over the transport yet.
 
+For the live dashboard, start a ``graphed.debug.DashboardServer`` and pass
+``NetworkMonitor(server.ingest_url, per_worker=True)`` as the monitor: each dask worker process
+then sends its task events straight to the dashboard over its own connection rather than through
+your client, as long as the workers can reach the dashboard's address. ``lean=True`` trims the events further; graphed's debugging
+guide covers both.
+
+Pausing and cancelling
+~~~~~~~~~~~~~~~~~~~~~~
+
+The runner ``dask_runner`` returns honours a ``graphed.core.RunControl``: a pause stops new tasks
+from starting until you resume, and a cancel lets the running tasks finish and returns the merge
+of the ones that completed, marked ``stopped=StopReason.CANCELLED``.
+``Dashboard(control=True).attach(runner)`` puts pause, resume and cancel buttons on the page and
+wires them to the runner; here a monitor stands in for the cancel button:
+
+.. code-block:: python
+
+    import time
+
+    import numpy as np
+    from distributed import Client, LocalCluster
+
+    from graphed.core import Partition, Plan, RunControl, Task
+    from graphed.core.execution import TaskPhase
+    from graphed_executors.dask_backend import dask_runner
+
+    def count(partition, resources):
+        time.sleep(0.2)
+        return np.asarray([partition.entry_stop - partition.entry_start])
+
+    def add(a, b):
+        return a + b
+
+    def zero():
+        return np.zeros(1, dtype=int)
+
+    class CancelOnFirstFinish:
+        """Stands in for the dashboard's cancel button."""
+
+        def __init__(self, control):
+            self.control = control
+
+        def on_task(self, event):
+            if event.phase is TaskPhase.FINISHED:
+                self.control.cancel()
+
+        def on_profile(self, worker, payload):
+            pass
+
+        def on_combine(self, leaves_done):
+            pass
+
+        def worker_profiler_factory(self):
+            return None
+
+    if __name__ == "__main__":
+        parts = tuple(Partition("data", "", i * 100, (i + 1) * 100) for i in range(40))
+        plan = Plan(process=count, combine=add, empty=zero,
+                    tasks=tuple(Task(i, p) for i, p in enumerate(parts)))
+        ctl = RunControl()
+        with (
+            LocalCluster(n_workers=2, threads_per_worker=1, processes=True,
+                         dashboard_address=":0") as cluster,
+            Client(cluster) as client,
+        ):
+            with dask_runner(client, monitor=CancelOnFirstFinish(ctl),
+                             replicate_broadcast=True) as runner:
+                runner.control = ctl              # what Dashboard(control=True).attach(runner) sets
+                result = runner.run(plan)
+
+        print(result.stopped, result.n_partitions < 40)
+        print(int(result.value[0]) == 100 * result.n_partitions, ctl.state)
+
+Prints::
+
+    cancelled True
+    True running
+
+The total is exactly the tasks that finished, and the control is back to ``running``, ready for
+the next plan: a cancel ends one run. Pass ``replicate_broadcast=True`` for a run you may pause or
+cancel. Every task reads your plan's functions from one broadcast copy, and dask runs a task where
+its input lives, so without replicas the tasks pile onto the worker holding that copy while the
+others sit idle.
+
 
 Deploying on batch clusters
 ---------------------------
@@ -523,8 +607,8 @@ Not supported yet
   departing owner costs a whole-run restart. Pass ``shuffle_method="tasks"`` on elastic clusters.
 * **No free-threaded (3.14t) support on the dask path**, because ``distributed`` declares none.
   The laptop executors do support it.
-* **No peer-mode telemetry** from the worker-to-worker reduction path, as noted under
-  `Watching a run`_.
-* **No checkpoint/resume on a cluster.** ``run_resumable`` and ``run_shuffle_resumable`` drive
-  themselves over a content-addressed store on the local filesystem; there is no distributed store
-  behind them yet.
+* **No peer-mode telemetry or run control** on the worker-to-worker reduction path: it emits no
+  task events and takes no pause or cancel.
+* **No resume after a crash.** A dask run that dies starts over. ``graphed.checkpoint``'s
+  ``run_resumable`` resumes, against a local directory or a store at a URL, but runs the
+  partitions itself, one at a time, not on your cluster.

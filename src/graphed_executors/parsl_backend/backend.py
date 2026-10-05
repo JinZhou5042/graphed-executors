@@ -56,7 +56,8 @@ _WORKER_DEATH_NAMES = ("WorkerLost", "ManagerLost")  # parsl death classes, matc
 class _ParslFuture:
     """A thin :class:`SubmitFuture` over a parsl future. ``result()`` unwraps the ``(result, events)``
     shim envelope and dispatches the buffered monitor events to the backend's driver-side handler
-    registry exactly once (completion-granularity piggyback); ``done``/``exception`` delegate."""
+    registry exactly once (completion-granularity piggyback); ``done``/``exception``/``cancel``/``cancelled``
+    delegate."""
 
     __slots__ = ("_dispatched", "_handlers", "_raw")
 
@@ -84,6 +85,9 @@ class _ParslFuture:
 
     def cancel(self) -> bool:
         return bool(self._raw.cancel())
+
+    def cancelled(self) -> bool:
+        return bool(self._raw.cancelled())
 
 
 class ParslBackend:
@@ -185,7 +189,15 @@ class ParslBackend:
         return unsub
 
     def cancel(self, futures: Sequence[Any]) -> None:
-        for fut in futures:  # best-effort: pre-run only (cancel_running=False) — a no-op cancel([])
+        """Best-effort, pre-run only (``cancel_running=False``); a no-op on HTEX. HTEX's futures are
+        never marked running, so a dispatched task's future still cancels, and when its result lands
+        parsl's result thread raises ``InvalidStateError`` on it and dies: every later task of the
+        executor then never resolves, and the thread's zmq socket stays open, so a later collection of
+        its context blocks in ``term()`` (the ``transport_peer`` cleanup avoids cancel for the same
+        reason). A TPE future is cancelled only if its thread has not taken it."""
+        if self._is_htex:
+            return
+        for fut in futures:
             cancel = getattr(fut, "cancel", None)
             if cancel is not None:
                 cancel()
@@ -217,9 +229,20 @@ class ParslBackend:
 
 
 def parsl_runner(
-    executor: Any, *, monitor: Any = None, retries: int = 3, max_in_flight: int = 2
+    executor: Any,
+    *,
+    monitor: Any = None,
+    retries: int = 3,
+    max_in_flight: int = 2,
+    services: Mapping[str, str] | None = None,
 ) -> SubmitRunner:
     """The user-facing one-liner: a :class:`SubmitRunner` over a :class:`ParslBackend` on a started
     parsl executor. ``close()`` does NOT shut the caller's executor down (the launch helper documents
-    teardown via ``stop_htex``)."""
-    return SubmitRunner(ParslBackend(executor), monitor=monitor, retries=retries, max_in_flight=max_in_flight)
+    teardown via ``stop_htex``). ``services`` are the runner's given service endpoints."""
+    return SubmitRunner(
+        ParslBackend(executor),
+        monitor=monitor,
+        retries=retries,
+        max_in_flight=max_in_flight,
+        services=services,
+    )

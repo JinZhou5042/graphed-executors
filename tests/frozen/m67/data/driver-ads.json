@@ -1,0 +1,19 @@
+{
+ "source": "synthetic: the job-ad shapes of the status lines in lanes/htcondor/probes/services-lpc/p1-dag/transcript-p1c-spool-tif.txt (JobStatus 1, 2, 4 with ExitCode 0 recorded there for clusters 30429635/30429674; JobStatus 3, 5 with HoldReasonCode 16 or 13, and ExitCode 1 or 3 derived). Undefined attributes are absent, as in a projected query answer.",
+ "cluster": 30429635,
+ "queue": [
+  {"case": "idle", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 1}, "status": "queued"},
+  {"case": "running", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 2}, "status": "running"},
+  {"case": "spooling-input", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 5, "HoldReasonCode": 16}, "status": "queued"},
+  {"case": "held", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 5, "HoldReasonCode": 13}, "status": "held"},
+  {"case": "removed", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 3}, "status": "removed"},
+  {"case": "completed-exit-0", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 4, "ExitCode": 0}, "status": "done"},
+  {"case": "completed-exit-1", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 4, "ExitCode": 1}, "status": "failed"},
+  {"case": "completed-exit-3", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 4, "ExitCode": 3}, "status": "failed"}
+ ],
+ "history": [
+  {"case": "left-queue-exit-0", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 4, "ExitCode": 0}, "status": "done"},
+  {"case": "left-queue-exit-3", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 4, "ExitCode": 3}, "status": "failed"},
+  {"case": "left-queue-removed", "ad": {"ClusterId": 30429635, "ProcId": 0, "JobStatus": 3}, "status": "removed"}
+ ]
+}

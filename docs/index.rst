@@ -24,6 +24,7 @@ Install
    pip install graphed-executors                  # laptop: thread and process pools
    pip install "graphed-executors[dask]"          # + a dask.distributed cluster
    pip install "graphed-executors[parsl]"         # + a parsl pool
+   pip install "graphed-executors[htcondor]"      # + pilot jobs on an HTCondor pool (Linux)
 
 ``graphed`` comes along as a dependency. It ships wheels, so a plain install needs nothing extra;
 installing it from source builds its Rust core, which needs a Rust toolchain.
@@ -83,6 +84,23 @@ What you get for free
 
 :doc:`design` explains why each of these holds.
 
+While a run is going
+--------------------
+
+* **Record the next plan while this one runs.** ``submit(plan)`` on any runner returns a
+  ``concurrent.futures.Future`` at once; ``.result()`` is what ``run(plan)`` returns. Plans run
+  one at a time, in the order you submitted them.
+* **Watch it, pause it, cancel it.** Every runner takes a ``monitor=`` that sees each task start
+  and finish, and a ``graphed.core.RunControl`` that pauses, resumes or cancels the run. A
+  cancelled run hands back the merge of the tasks that finished. ``graphed.debug.Dashboard``
+  (``pip install "graphed[dashboard]"``) puts both in your browser; ``control=True`` adds the
+  buttons.
+* **Let the workers report for themselves.** On a large pool, a dashboard monitor built with
+  ``per_worker=True`` has every worker process send its events straight to the dashboard instead
+  of through your submit node.
+
+:doc:`design` covers each, including which runs a pause or cancel reaches.
+
 Which runner do I want?
 -----------------------
 
@@ -112,6 +130,10 @@ Which runner do I want?
    * - A parsl pool (HTEX on SLURM, HTCondor, LSF, …)
      - ``parsl_runner(executor)`` — see :doc:`parsl`
      - Your task functions must live in an installed module, not in ``__main__``.
+   * - An HTCondor pool: the LPC, lxplus, or your own
+     - ``htcondor_runner(site=..., n_pilots=N)`` — see :doc:`htcondor`
+     - Submits its own pilot jobs; no scheduler to start. Task functions go in a module you pass
+       in ``user_modules``.
 
 Going to a cluster is one substitution. Everything above the ``plan = ...`` line stays as it
 is; only the runner changes.
@@ -181,14 +203,18 @@ Where to go next
    design
    dask
    parsl
+   htcondor
+   hgg
    api
    improvements
    changelog
 
 * :doc:`design` — why your result is reproducible, where your merges run, and what happens
   when a worker dies.
-* :doc:`dask` and :doc:`parsl` — install, a worked run, the knobs, and the failures you will
-  actually hit.
+* :doc:`dask`, :doc:`parsl` and :doc:`htcondor` — install, a worked run, the knobs, and the
+  failures you will actually hit.
+* :doc:`hgg` — a real coffea analysis translated to graphed, and how its answers are checked
+  against the original's.
 * :doc:`api` — the reference, grouped by what you are doing.
 * :doc:`changelog` — what each release gives you that the last one did not.
 

@@ -11,10 +11,18 @@ The worker seam (plan §1.1, review r1 B1): per-run state travels as a picklable
 first argument; per-worker capability (``open_once`` resources + the event transport) arrives via a
 :class:`WorkerEnv` a BACKEND installs through its own module-level shim — never via an import here,
 so ``submit/`` names dask nowhere and ``test_submit_no_dask_import`` holds.
+
+A submission's scope is its run (plan-services §3.1): ``run`` opens one ``ExitStack`` and registers on
+it everything the submission acquires — the plan's :class:`ServiceSet` (``submit/services.py``) when
+``plan.services`` is non-empty, then a ``cancel`` of its plan tasks not yet done — so no service,
+record or queued task of a run outlives it or reaches another. The body runs on the plan with the
+run's endpoints bound (graphed's ``bind_services``, before the first plan-task submit), and the value
+is resolved against the plan while its services are still up.
 """
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import pickle
@@ -23,12 +31,23 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
-from graphed.core import ExecContext, ExecResult, Plan, RunControl, RunState, StopReason, Task
+import cloudpickle
+from graphed import services as graphed_services
+from graphed.core import (
+    DurablePlanV2,
+    ExecContext,
+    ExecResult,
+    Plan,
+    RunControl,
+    RunState,
+    StopReason,
+    Task,
+)
 from graphed.core.execution import (
     LocalResources,
     Monitor,
@@ -36,15 +55,19 @@ from graphed.core.execution import (
     TaskPhase,
     WorkerResources,
     emit_task,
+    lean_events,
     partition_label,
+    worker_monitor_factory,
 )
 from graphed.debug import SourceFrame, StageError
+from graphed.shuffle import pick, split
 
 from graphed_executors._plan_queue import PlanQueue
 from graphed_executors.local._reduce import plan_tree, running_fold
-from graphed_executors.local.executors import _PAUSED_WAKE_S, _Window
+from graphed_executors.local.executors import _PAUSED_WAKE_S, _wait_until, _Window
 
 from .protocol import SubmitBackend, SubmitFuture
+from .services import ServiceSet
 
 if TYPE_CHECKING:
     from graphed.core import Partition
@@ -65,6 +88,13 @@ class RunContext:
     run_nonce: str
     monitor_topic: str | None  # f"graphed-monitor-{run_nonce}" when a monitor is attached, else None
     profiler_payload: bytes | None  # pickled worker_profiler_factory (small by contract), else None
+    monitor_factory: bytes | None = None  # pickled worker_monitor_factory: workers push, not the topic
+    lean: bool = False  # lean events: no STARTED, and an unlabelled terminal event
+
+    @property
+    def events_per_leaf(self) -> int:
+        """Worker events the driver's topic receives per leaf (none when workers push)."""
+        return 0 if self.monitor_factory is not None else 1 if self.lean else 2
 
 
 class WorkerEnv(Protocol):
@@ -153,15 +183,37 @@ def _event_dict(
     }
 
 
+# One pushed monitor per worker process and shipped factory; two task threads can reach a fresh
+# process's first build together, hence the lock.
+_WORKER_MONITORS: dict[bytes, Monitor | None] = {}
+_WORKER_MONITORS_LOCK = threading.Lock()
+
+
+def _worker_monitor(payload: bytes) -> Monitor | None:
+    with _WORKER_MONITORS_LOCK:
+        if payload not in _WORKER_MONITORS:
+            monitor: Monitor | None = None
+            with contextlib.suppress(Exception):  # a monitor that won't build just disables telemetry
+                monitor = pickle.loads(payload)()
+            _WORKER_MONITORS[payload] = monitor
+        return _WORKER_MONITORS[payload]
+
+
 def _emit_phase(
     ctx: RunContext, env: WorkerEnv, phase: TaskPhase, task: Task, *, error: str | None = None
 ) -> None:
     if ctx.monitor_topic is None:  # no monitor attached -> zero telemetry cost on the task path
         return
-    ev = _event_dict(
-        phase, task.key, env.worker, partition_label(task.partition), task.partition.n_entries, error
+    label = "" if ctx.lean else partition_label(task.partition)
+    if ctx.monitor_factory is not None:
+        ev = TaskEvent(
+            phase, task.key, env.worker, time.perf_counter(), label, task.partition.n_entries, error=error
+        )
+        emit_task(_worker_monitor(ctx.monitor_factory), ev)
+        return
+    env.emit(
+        ctx.monitor_topic, [_event_dict(phase, task.key, env.worker, label, task.partition.n_entries, error)]
     )
-    env.emit(ctx.monitor_topic, [ev])
 
 
 def _render_error(exc: BaseException) -> str:
@@ -177,7 +229,8 @@ def _leaf_task(ctx: RunContext, payload: bytes, token: str, task: Task) -> objec
     ``payload`` is the resolved broadcast bytes; the token cache deserializes it once per worker."""
     process = cast("Callable[[Partition, WorkerResources], object]", _shared_payload(token, payload))
     env = current_env()
-    _emit_phase(ctx, env, TaskPhase.STARTED, task)
+    if not ctx.lean:
+        _emit_phase(ctx, env, TaskPhase.STARTED, task)
     try:
         result = process(task.partition, env.resources)
     except BaseException as exc:
@@ -194,9 +247,20 @@ def _combine_task(ctx: RunContext, payload: bytes, token: str, a: object, b: obj
     return combine(a, b)
 
 
-def _fingerprint(obj: object) -> tuple[str, bytes]:
+def _stage_task(payload: bytes, token: str, task: Task, *inputs: bytes) -> bytes:
+    """Run one task of a ``DurablePlanV2`` stage: ``process(task, inputs, resources)``."""
+    process = cast("Callable[..., bytes]", _shared_payload(token, payload))
+    return process(task, inputs, current_env().resources)
+
+
+def _map_task(payload: bytes, token: str, task: Task, *inputs: bytes) -> dict[int, bytes]:
+    """A ``map_write`` task, its payload split per dest so each (map, dest) edge moves one slice."""
+    return split(_stage_task(payload, token, task, *inputs))
+
+
+def _fingerprint(obj: object, dumps: Callable[[object], bytes] = pickle.dumps) -> tuple[str, bytes]:
     """(12-hex content fingerprint, pickled payload) — the M31 broadcast-token idiom."""
-    payload = pickle.dumps(obj)
+    payload = dumps(obj)
     return hashlib.sha256(payload).hexdigest()[:12], payload
 
 
@@ -220,16 +284,41 @@ def _event_from_dict(d: dict[str, object]) -> TaskEvent:
     )
 
 
-def _wait_until(predicate: Callable[[], bool], timeout_s: float) -> None:
-    """Bounded off-path poll (never an assertion): drain trailing worker events before unsubscribe."""
-    deadline = time.monotonic() + timeout_s
-    while not predicate() and time.monotonic() < deadline:
-        time.sleep(0.005)
+class _RunTasks:
+    """One run's plan-task submits (the ``_RunLeaves`` idiom): only the futures not yet done are held,
+    since a held dask future pins its result in cluster memory, and :meth:`cancel` cancels those."""
+
+    def __init__(self, backend: SubmitBackend) -> None:
+        self._backend = backend
+        self._lock = threading.Lock()
+        self._pending: set[SubmitFuture] = set()
+
+    def submit(self, fn: Callable[..., object], /, *args: object, key: str, retries: int) -> SubmitFuture:
+        fut = self._backend.submit(fn, *args, key=key, retries=retries)
+        with self._lock:
+            self._pending.add(fut)
+        fut.add_done_callback(self._done)  # outside the lock: a done future calls back at once
+        return fut
+
+    def _done(self, fut: SubmitFuture) -> None:
+        with self._lock:
+            self._pending.discard(fut)
+
+    def cancel(self) -> None:
+        """Cancel the run's plan tasks not yet done (best-effort, as ``backend.cancel`` is)."""
+        with self._lock:
+            pending = [fut for fut in self._pending if not fut.done()]  # a done one may not have called back
+        if pending:
+            self._backend.cancel(pending)
 
 
 class SubmitRunner:
     """A :class:`graphed.core.Executor` over any :class:`SubmitBackend`. ``run`` dispatches to the
-    adaptive path when the plan carries ``next_tasks``, else the fixed ``plan_tree`` future graph."""
+    adaptive path when the plan carries ``next_tasks``, else the fixed ``plan_tree`` future graph.
+
+    ``services`` (service name -> ``scheme://host:port``) are the leg-1 endpoints of every run, read
+    once at each run's start like ``monitor``; a user-held :class:`ServiceSet`'s endpoints keep its
+    services warm across runs."""
 
     def __init__(
         self,
@@ -239,11 +328,13 @@ class SubmitRunner:
         retries: int = 3,
         max_in_flight: int = 2,
         control: RunControl | None = None,
+        services: Mapping[str, str] | None = None,
     ) -> None:
         self._plans = PlanQueue(self.run, max_in_flight)
         self.backend = backend
         self.monitor = monitor  # read once at each run's start (Dashboard.attach assigns it)
         self.control = control  # likewise
+        self.services = services  # likewise
         self._retries = retries
 
     def __enter__(self) -> SubmitRunner:
@@ -267,18 +358,45 @@ class SubmitRunner:
         self._plans.close()
         self.backend.close()
 
-    def run(self, plan: Plan[R]) -> ExecResult[R]:
-        run_nonce = uuid.uuid4().hex[:8]
+    @overload
+    def run(self, plan: Plan[R]) -> ExecResult[R]: ...
+    @overload
+    def run(self, plan: DurablePlanV2) -> ExecResult[Any]: ...
+    def run(self, plan: Plan[R] | DurablePlanV2) -> ExecResult[R] | ExecResult[Any]:
+        """Run ``plan``. Its services are resolved, checked, probed and bound before the first plan task
+        is submitted, and released, with any of its tasks not yet done, when ``run`` returns or raises.
+        A :class:`~graphed.core.DurablePlanV2` (a join or repartition) runs stage by stage to
+        ``plan.value`` of its last stage; a cancel returns ``value=None``."""
         monitor = self.monitor
         control = self.control
-        monitor_topic = f"graphed-monitor-{run_nonce}" if monitor is not None else None
+        given = self.services
+        ctx = self._context(uuid.uuid4().hex[:8], monitor)
+        with contextlib.ExitStack() as scope:  # the submission's scope: released in reverse on exit
+            return self._run_scoped(plan, monitor, control, given, ctx, scope)
+
+    def _run_scoped(
+        self,
+        plan: Plan[R] | DurablePlanV2,
+        monitor: Monitor | None,
+        control: RunControl | None,
+        given: Mapping[str, str] | None,
+        ctx: RunContext,
+        scope: contextlib.ExitStack,
+    ) -> ExecResult[R] | ExecResult[Any]:
         events_seen = [0]
         seen_lock = threading.Lock()  # handlers run on worker threads; += is not atomic without the GIL
         unsub: Callable[[], None] | None = None
         try:
             if control is not None and control.state is RunState.CANCELLED:
-                return ExecResult(plan.empty(), 0, 0, StopReason.CANCELLED)
-            if monitor is not None and monitor_topic is not None:
+                empty = None if isinstance(plan, DurablePlanV2) else plan.empty()
+                return ExecResult(empty, 0, 0, StopReason.CANCELLED)
+            bound = plan
+            if plan.services:
+                services = ServiceSet(plan.services, self.backend, endpoints=given, scope=ctx.run_nonce)
+                bound = graphed_services.bind_services(plan, scope.enter_context(services))
+            submits = _RunTasks(self.backend)
+            scope.callback(submits.cancel)  # registered after the services, so it runs before their release
+            if ctx.monitor_topic is not None and ctx.events_per_leaf:
 
                 def handler(events: list[dict[str, object]]) -> None:
                     with seen_lock:
@@ -286,16 +404,23 @@ class SubmitRunner:
                     for d in events:
                         emit_task(monitor, _event_from_dict(d))  # swallows a raising monitor (passivity)
 
-                unsub = self.backend.subscribe_events(monitor_topic, handler)
-            if control is not None:  # the default path never meets a window
-                if plan.next_tasks is not None:
-                    return self._run_adaptive_windowed(
-                        plan, monitor, control, run_nonce, monitor_topic, events_seen
-                    )
-                return self._run_fixed_windowed(plan, monitor, control, run_nonce, monitor_topic, events_seen)
-            if plan.next_tasks is not None:
-                return self._run_adaptive(plan, monitor, run_nonce, monitor_topic, events_seen)
-            return self._run_fixed(plan, monitor, run_nonce, monitor_topic, events_seen)
+                unsub = self.backend.subscribe_events(ctx.monitor_topic, handler)
+            result: ExecResult[R] | ExecResult[Any]
+            if isinstance(bound, DurablePlanV2):
+                result = self._run_stages(bound, control, ctx, submits)
+            elif control is not None:  # the default path never meets a window
+                if bound.next_tasks is not None:
+                    result = self._run_adaptive_windowed(bound, monitor, control, ctx, events_seen, submits)
+                else:
+                    result = self._run_fixed_windowed(bound, monitor, control, ctx, events_seen, submits)
+            elif bound.next_tasks is not None:
+                result = self._run_adaptive(bound, monitor, ctx, events_seen, submits)
+            else:
+                result = self._run_fixed(bound, monitor, ctx, events_seen, submits)
+            if not plan.services:
+                return result
+            # graphed's walk, through collate and aggregate_plan, while the services are still up
+            return replace(result, value=graphed_services.resolve_services(bound, result.value))
         finally:
             if unsub is not None:
                 unsub()
@@ -308,9 +433,9 @@ class SubmitRunner:
         self,
         plan: Plan[R],
         monitor: Monitor | None,
-        run_nonce: str,
-        monitor_topic: str | None,
+        ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         backend = self.backend
         tasks = sorted(plan.tasks, key=lambda t: t.key)  # deterministic leaf order
@@ -318,44 +443,43 @@ class SubmitRunner:
         if n == 0:
             return ExecResult(plan.empty(), 0, 0, StopReason.EXHAUSTED)
         plan_fp, ppayload = _fingerprint(plan.process)
-        ctx = RunContext(run_nonce, monitor_topic, self._profiler_payload(monitor))
-        ptoken = f"{plan_fp}-{run_nonce}"
+        ptoken = f"{plan_fp}-{ctx.run_nonce}"
         phandle = backend.broadcast(ppayload, token=ptoken)
         key_to_task: dict[str, Task] = {}
         futs: dict[int, SubmitFuture] = {}
         try:
             for i, task in enumerate(tasks):
-                if monitor is not None and monitor_topic is not None:
+                if monitor is not None:
                     emit_task(monitor, self._submitted_event(task))  # driver-side SUBMITTED (leaves only)
-                key = _key(plan_fp, run_nonce, "leaf", i)
+                key = _key(plan_fp, ctx.run_nonce, "leaf", i)
                 key_to_task[key] = task
-                futs[i] = backend.submit(
+                futs[i] = submits.submit(
                     _leaf_task, ctx, phandle, ptoken, task, key=key, retries=self._retries
                 )
             combines, root = plan_tree(n)
             assert root is not None  # n >= 1
             _cfp, cpayload = _fingerprint(plan.combine)
-            ctoken = f"{_cfp}-{run_nonce}"
+            ctoken = f"{_cfp}-{ctx.run_nonce}"
             chandle = backend.broadcast(cpayload, token=ctoken)
             for out, a, b in combines:  # a < b: deterministic left/right, the plan_tree shape
-                key = _key(plan_fp, run_nonce, "combine", out)
-                futs[out] = backend.submit(
+                key = _key(plan_fp, ctx.run_nonce, "combine", out)
+                futs[out] = submits.submit(
                     _combine_task, ctx, chandle, ctoken, futs[a], futs[b], key=key, retries=self._retries
                 )
             value = cast(R, self._result(futs[root], key_to_task))
             return ExecResult(value, n, len(combines), StopReason.EXHAUSTED)
         finally:
-            if monitor_topic is not None:  # drain trailing worker events (2 per leaf) before unsubscribe
-                _wait_until(lambda: events_seen[0] >= 2 * n, _DRAIN_TIMEOUT_S)
+            if ctx.monitor_topic is not None:  # drain trailing worker events before unsubscribe
+                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * n, _DRAIN_TIMEOUT_S)
 
     def _run_fixed_windowed(
         self,
         plan: Plan[R],
         monitor: Monitor | None,
         control: RunControl,
-        run_nonce: str,
-        monitor_topic: str | None,
+        ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         """``_run_fixed`` through a :class:`_Window`: the same ``plan_tree``, with each combine submitted
         once both inputs completed, so a cancel leaves completed subtrees to fold by first leaf."""
@@ -372,11 +496,10 @@ class SubmitRunner:
             waiting.setdefault(b, []).append(ci)
             first.append(first[a])
         plan_fp, ppayload = _fingerprint(plan.process)
-        ctx = RunContext(run_nonce, monitor_topic, self._profiler_payload(monitor))
-        ptoken = f"{plan_fp}-{run_nonce}"
+        ptoken = f"{plan_fp}-{ctx.run_nonce}"
         phandle = backend.broadcast(ppayload, token=ptoken)
         _cfp, cpayload = _fingerprint(plan.combine)
-        ctoken = f"{_cfp}-{run_nonce}"
+        ctoken = f"{_cfp}-{ctx.run_nonce}"
         chandle = backend.broadcast(cpayload, token=ctoken)
         if monitor is not None:
             for task in tasks:
@@ -391,9 +514,9 @@ class SubmitRunner:
         def start(item: tuple[int, Task]) -> None:
             nonlocal sent
             i, task = item
-            key = _key(plan_fp, run_nonce, "leaf", i)
+            key = _key(plan_fp, ctx.run_nonce, "leaf", i)
             key_to_task[key] = task
-            fut = backend.submit(_leaf_task, ctx, phandle, ptoken, task, key=key, retries=self._retries)
+            fut = submits.submit(_leaf_task, ctx, phandle, ptoken, task, key=key, retries=self._retries)
             sent += 1
             node_of[fut] = i
             fut.add_done_callback(done_q.put)
@@ -421,8 +544,8 @@ class SubmitRunner:
                     if not remaining[ci]:
                         out, a, b = combines[ci]
                         fa, fb = ready.pop(a), ready.pop(b)
-                        key = _key(plan_fp, run_nonce, "combine", out)
-                        f2 = backend.submit(
+                        key = _key(plan_fp, ctx.run_nonce, "combine", out)
+                        f2 = submits.submit(
                             _combine_task, ctx, chandle, ctoken, fa, fb, key=key, retries=self._retries
                         )
                         n_combines += 1
@@ -435,8 +558,8 @@ class SubmitRunner:
             stopped = StopReason.CANCELLED if window.stopped else StopReason.EXHAUSTED
             return ExecResult(value, done, n_combines + k, stopped)
         finally:
-            if monitor_topic is not None:  # drain trailing worker events (2 per submitted leaf)
-                _wait_until(lambda: events_seen[0] >= 2 * sent, _DRAIN_TIMEOUT_S)
+            if ctx.monitor_topic is not None:  # drain trailing worker events of every submitted leaf
+                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * sent, _DRAIN_TIMEOUT_S)
 
     # ---- adaptive path + stop (plan §1.2.4) ----
 
@@ -444,16 +567,15 @@ class SubmitRunner:
         self,
         plan: Plan[R],
         monitor: Monitor | None,
-        run_nonce: str,
-        monitor_topic: str | None,
+        ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         assert plan.next_tasks is not None
         backend = self.backend
         next_tasks = plan.next_tasks
         plan_fp, ppayload = _fingerprint(plan.process)
-        ctx = RunContext(run_nonce, monitor_topic, self._profiler_payload(monitor))
-        ptoken = f"{plan_fp}-{run_nonce}"
+        ptoken = f"{plan_fp}-{ctx.run_nonce}"
         phandle = backend.broadcast(ppayload, token=ptoken)
         exec_ctx = ExecContext()
         done_q: queue.Queue[SubmitFuture] = queue.Queue()
@@ -469,11 +591,11 @@ class SubmitRunner:
             if not batch:
                 return
             for task in batch:
-                if monitor is not None and monitor_topic is not None:
+                if monitor is not None:
                     emit_task(monitor, self._submitted_event(task))
-                dask_key = _key(plan_fp, run_nonce, "leaf", seq)
+                dask_key = _key(plan_fp, ctx.run_nonce, "leaf", seq)
                 key_to_task[dask_key] = task  # F2b: attribute a KilledWorker to this chunk (not the key)
-                fut = backend.submit(
+                fut = submits.submit(
                     _leaf_task, ctx, phandle, ptoken, task, key=dask_key, retries=self._retries
                 )
                 seq += 1
@@ -500,25 +622,24 @@ class SubmitRunner:
             value, n_combines = running_fold(iter(results), plan.combine, plan.empty)
             return ExecResult(value, exec_ctx.n_done, n_combines, stopped or StopReason.EXHAUSTED)
         finally:
-            if monitor_topic is not None:  # F2a: drain trailing worker events (2 per consumed leaf)
-                _wait_until(lambda: events_seen[0] >= 2 * exec_ctx.n_done, _DRAIN_TIMEOUT_S)
+            if ctx.monitor_topic is not None:  # F2a: drain trailing worker events of every consumed leaf
+                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * exec_ctx.n_done, _DRAIN_TIMEOUT_S)
 
     def _run_adaptive_windowed(
         self,
         plan: Plan[R],
         monitor: Monitor | None,
         control: RunControl,
-        run_nonce: str,
-        monitor_topic: str | None,
+        ctx: RunContext,
         events_seen: list[int],
+        submits: _RunTasks,
     ) -> ExecResult[R]:
         """``_run_adaptive`` with each ``next_tasks`` batch held in a :class:`_Window`."""
         assert plan.next_tasks is not None
         backend = self.backend
         next_tasks = plan.next_tasks
         plan_fp, ppayload = _fingerprint(plan.process)
-        ctx = RunContext(run_nonce, monitor_topic, self._profiler_payload(monitor))
-        ptoken = f"{plan_fp}-{run_nonce}"
+        ptoken = f"{plan_fp}-{ctx.run_nonce}"
         phandle = backend.broadcast(ppayload, token=ptoken)
         exec_ctx = ExecContext()
         done_q: queue.Queue[SubmitFuture] = queue.Queue()
@@ -534,15 +655,15 @@ class SubmitRunner:
             if not batch:
                 return
             for task in batch:
-                if monitor is not None and monitor_topic is not None:
+                if monitor is not None:
                     emit_task(monitor, self._submitted_event(task))
             window.held.extend(batch)
 
         def start(task: Task) -> None:
             nonlocal seq
-            dask_key = _key(plan_fp, run_nonce, "leaf", seq)
+            dask_key = _key(plan_fp, ctx.run_nonce, "leaf", seq)
             key_to_task[dask_key] = task  # F2b: attribute a KilledWorker to this chunk (not the key)
-            fut = backend.submit(_leaf_task, ctx, phandle, ptoken, task, key=dask_key, retries=self._retries)
+            fut = submits.submit(_leaf_task, ctx, phandle, ptoken, task, key=dask_key, retries=self._retries)
             seq += 1
             outstanding[fut] = (task.key, task.partition.n_entries)
             fut.add_done_callback(done_q.put)  # backend-neutral as_completed (queue.Queue)
@@ -580,8 +701,84 @@ class SubmitRunner:
             stopped = stopped or (StopReason.CANCELLED if window.stopped else StopReason.EXHAUSTED)
             return ExecResult(value, exec_ctx.n_done, n_combines, stopped)
         finally:
-            if monitor_topic is not None:  # F2a: drain trailing worker events (2 per consumed leaf)
-                _wait_until(lambda: events_seen[0] >= 2 * exec_ctx.n_done, _DRAIN_TIMEOUT_S)
+            if ctx.monitor_topic is not None:  # F2a: drain trailing worker events of every consumed leaf
+                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * exec_ctx.n_done, _DRAIN_TIMEOUT_S)
+
+    # ---- staged path: a DurablePlanV2's stages as barriers ----
+
+    def _run_stages(
+        self, plan: DurablePlanV2, control: RunControl | None, ctx: RunContext, submits: _RunTasks
+    ) -> ExecResult[Any]:
+        """Submit each stage once the stages it reads have finished. A ``map_write`` task's payload
+        reaches each gather as that gather's slice alone: picked in a task beside it where the backend
+        moves data between workers, else picked here from its one fetch."""
+        backend = self.backend
+        peer = backend.capabilities.peer_data_movement
+        plan_fp = plan.ir_fingerprint()[:12]
+        done_q: queue.Queue[SubmitFuture] = queue.Queue()
+        outstanding: dict[SubmitFuture, bool] = {}  # stage task not yet seen done -> its stage has inputs
+        key_to_task: dict[str, Task] = {}
+        stage_futs: list[list[SubmitFuture]] = []
+        ran = [0, 0]  # tasks of stages with no inputs, tasks of the others
+
+        def settle(needed: list[SubmitFuture]) -> bool:
+            """Wait until ``needed`` is done; False when a completion finds the run cancelled."""
+            remaining = {f for f in needed if f in outstanding}
+            while remaining:
+                fut = done_q.get()  # each stage task completes into the queue once
+                ran[outstanding.pop(fut)] += 1
+                remaining.discard(fut)
+                if fut.exception() is not None:  # exception() transfers no result on dask
+                    self._result(fut, key_to_task)  # raises it, translated
+                if control is not None and control.state is RunState.CANCELLED:
+                    return False
+            return True
+
+        for s, stage in enumerate(plan.stages):
+            upstream = [f for i in stage.inputs for f in stage_futs[i]]
+            if not settle(upstream) or (control is not None and control.wait() is RunState.CANCELLED):
+                return ExecResult(None, ran[0], ran[1], StopReason.CANCELLED)
+            # by value: a resolved opaque process is a copy stdlib pickle cannot name by reference
+            fp, payload = _fingerprint(stage.process.resolve(), cloudpickle.dumps)
+            token = f"{fp}-{ctx.run_nonce}"
+            handle = backend.broadcast(payload, token=token)
+            fn = _map_task if stage.kind == "map_write" else _stage_task
+            # driver edge: each map result is fetched once, then sliced per dest here
+            fetched = {
+                i: [cast("dict[int, bytes]", self._result(f, key_to_task)) for f in stage_futs[i]]
+                for i in stage.inputs
+                if plan.stages[i].kind == "map_write" and not peer
+            }
+            futs: list[SubmitFuture] = []
+            for t, task in enumerate(stage.tasks):
+                args: list[object] = []
+                for i in stage.inputs:
+                    if i in fetched:
+                        args.extend(pick(m, task.key) for m in fetched[i])
+                    elif plan.stages[i].kind == "map_write":
+                        args.extend(
+                            submits.submit(
+                                pick,
+                                f,
+                                task.key,
+                                key=_key(plan_fp, ctx.run_nonce, f"pick.{i}.{m}", task.key),
+                                retries=self._retries,
+                            )
+                            for m, f in enumerate(stage_futs[i])
+                        )
+                    else:
+                        args.extend(stage_futs[i])
+                key = _key(plan_fp, ctx.run_nonce, f"{stage.kind}.{s}", t)
+                key_to_task[key] = task
+                fut = submits.submit(fn, handle, token, task, *args, key=key, retries=self._retries)
+                outstanding[fut] = bool(stage.inputs)
+                fut.add_done_callback(done_q.put)
+                futs.append(fut)
+            stage_futs.append(futs)
+        if not settle(list(outstanding)):
+            return ExecResult(None, ran[0], ran[1], StopReason.CANCELLED)
+        last = [cast("bytes", self._result(f, key_to_task)) for f in stage_futs[-1]]
+        return ExecResult(plan.value(last), ran[0], ran[1], StopReason.EXHAUSTED)
 
     # ---- helpers ----
 
@@ -651,6 +848,18 @@ class SubmitRunner:
             time.perf_counter(),
             partition_label(task.partition),
             task.partition.n_entries,
+        )
+
+    def _context(self, run_nonce: str, monitor: Monitor | None) -> RunContext:
+        if monitor is None:
+            return RunContext(run_nonce, None, None)
+        push = worker_monitor_factory(monitor)
+        return RunContext(
+            run_nonce,
+            f"graphed-monitor-{run_nonce}",
+            self._profiler_payload(monitor),
+            pickle.dumps(push) if push is not None else None,
+            lean_events(monitor),
         )
 
     def _profiler_payload(self, monitor: Monitor | None) -> bytes | None:

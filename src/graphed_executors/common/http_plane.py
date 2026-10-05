@@ -33,11 +33,11 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
-from graphed_executors.local._transport import HttpTransport
+from graphed_executors.local._transport import HttpTransport, LookupFreeHTTPServer
 
 #: the frozen local sender policy (``local/_transport.py:293``), restated so the retry arms budget it.
 SEND_RETRIES = 5
@@ -92,7 +92,7 @@ class _DualRouteHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _DualRouteServer(ThreadingHTTPServer):
+class _DualRouteServer(LookupFreeHTTPServer):
     daemon_threads = True
     request_queue_size = 256
 

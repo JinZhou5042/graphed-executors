@@ -17,6 +17,7 @@ a dask cluster, or on a parsl HTEX pool — you change the runner, not the analy
 pip install graphed-executors            # laptop runners; pulls graphed
 pip install "graphed-executors[dask]"    # + the dask.distributed backend
 pip install "graphed-executors[parsl]"   # + the parsl backend
+pip install "graphed-executors[htcondor]" # + direct HTCondor pilot jobs (Linux)
 pip install "graphed-executors[taskvine]" # + TaskVine adapter dependencies
 ```
 
@@ -99,6 +100,7 @@ be module-level functions the workers can import — a lambda or a notebook-cell
 | A many-core machine where the worker count strains the open-file limit | `PinnedPoolExecutor` | `graphed_executors.local` |
 | A dask cluster (local, dask-jobqueue, Kubernetes, …) | `dask_runner(client)` | `graphed_executors.dask_backend` |
 | A parsl HTEX pool | `parsl_runner(executor)` | `graphed_executors.parsl_backend` |
+| An HTCondor pool (LPC, lxplus, your own) | `htcondor_runner(site=..., n_pilots=N)` | `graphed_executors.htcondor_backend` |
 | A TaskVine cluster | `TaskVineExecutor()` | `graphed_executors.taskvine_backend` |
 
 (`import graphed_exec_local` still works as a deprecated alias for `graphed_executors.local`;
@@ -109,7 +111,7 @@ The TaskVine backend requires a CCTools build that provides
 `graphed-executors` package in the worker environment as well as on the driver.
 The `[taskvine]` extra installs the Python adapter dependency, but not CCTools itself.
 Build the CCTools `task-graph` branch using its [source installation guide](https://github.com/JinZhou5042/cctools/blob/task-graph/doc/manuals/install/index.md#install-from-github).
-Direct HTCondor/Slurm submission isn't supported; use a TaskVine factory,
+Direct Slurm submission isn't supported; use a TaskVine factory,
 dask-jobqueue, or a parsl provider to reach those batch systems.
 
 ### On TaskVine
@@ -212,7 +214,7 @@ Two things bite people on HTEX:
 - **A killed worker takes ~30 s to notice at parsl's default heartbeat.** `heartbeat_period=2`
   brings that to ~1.65 s, so a crash is reported (and the worker respawned) promptly.
 
-## Useful knobs on the laptop runners
+## Useful knobs
 
 - `persistent=True` keeps the process pool alive across `run()` calls — worth it in notebooks
   and parameter sweeps, where the spawn cost would otherwise repeat per plan. Use it as a
@@ -221,20 +223,29 @@ Two things bite people on HTEX:
 - Call `resources.open_once(uri, opener)` inside your `process` and the worker keeps that handle
   for its lifetime, so ten partitions of one file on one worker open it once instead of ten
   times. The dask backend gives you the same per-worker handle through its worker plugin.
+- `submit(plan)`, on every runner here, returns a `concurrent.futures.Future` straight away, so
+  you can record and compile the next plan while this one runs; `.result()` is what `run(plan)`
+  would have returned. Plans still run one at a time, in the order you submitted them.
+- A plan that calls a server (an inference server, say) declares it, and the cluster runners find
+  it for each run: `services={"triton": "grpc://host:8001"}`, the site's, or one they start from
+  the declared recipe and stop afterwards. See [Services](docs/htcondor.rst#services).
 - Every runner accepts `monitor=` — an observer that receives one event per task submitted,
-  started, and finished, without changing the run. Pass `graphed.debug.Dashboard`'s monitor for
-  a live web view.
+  started, and finished, without changing the run — and a `graphed.core.RunControl` that pauses,
+  resumes or cancels it. A cancelled run returns the merge of the tasks that finished.
 
-The dashboard needs `pip install "graphed[dashboard]"`. Using the `plan` from your first run:
+`graphed.debug.Dashboard` gives you both in the browser: a live view of the run, and with
+`control=True` pause, resume and cancel buttons. It needs `pip install "graphed[dashboard]"`.
+Using the `plan` from your first run:
 
 ```python
 from graphed.debug import Dashboard
 from graphed_executors.local import ProcessPoolExecutor
 
 if __name__ == "__main__":                    # a spawn pool re-imports this file
-    with Dashboard(profile=True) as dash:
-        result = ProcessPoolExecutor(max_workers=4, monitor=dash.monitor).run(plan)
-    print(result.value)                       # [700]
+    with Dashboard(profile=True, control=True) as dash:
+        print("open", dash.url)               # the page updates while the plan runs
+        result = dash.attach(ProcessPoolExecutor(max_workers=4)).run(plan)
+    print(result.value, result.stopped)       # [700] exhausted ("cancelled" after a cancel)
 ```
 
 ## Next

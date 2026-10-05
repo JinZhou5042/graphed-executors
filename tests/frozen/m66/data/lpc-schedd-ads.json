@@ -1,0 +1,36 @@
+{
+ "ads": [
+  {
+   "CondorVersion": "$CondorVersion: 25.0.14 2026-08-30 BuildID: 947353 PackageID: 25.0.14-1 $",
+   "FERMIHTC_DRAIN_LPCSCHEDD": false,
+   "FERMIHTC_SCHEDD_TYPE": "CMSLPC",
+   "MaxJobsRunning": 10000,
+   "Name": "lpcschedd4.fnal.gov",
+   "RecentDaemonCoreDutyCycle": 0.1076582372311043,
+   "ShadowsRunning": 561,
+   "TotalIdleJobs": 14078
+  },
+  {
+   "CondorVersion": "$CondorVersion: 25.0.14 2026-08-30 BuildID: 947353 PackageID: 25.0.14-1 $",
+   "FERMIHTC_DRAIN_LPCSCHEDD": false,
+   "FERMIHTC_SCHEDD_TYPE": "CMSLPC",
+   "MaxJobsRunning": 10000,
+   "Name": "lpcschedd6.fnal.gov",
+   "RecentDaemonCoreDutyCycle": 0.02868212182682151,
+   "ShadowsRunning": 336,
+   "TotalIdleJobs": 17401
+  },
+  {
+   "CondorVersion": "$CondorVersion: 25.0.14 2026-08-30 BuildID: 947353 PackageID: 25.0.14-1 $",
+   "FERMIHTC_DRAIN_LPCSCHEDD": false,
+   "FERMIHTC_SCHEDD_TYPE": "CMSLPC",
+   "MaxJobsRunning": 10000,
+   "Name": "lpcschedd5.fnal.gov",
+   "RecentDaemonCoreDutyCycle": 0.07660802673687617,
+   "ShadowsRunning": 660,
+   "TotalIdleJobs": 14203
+  }
+ ],
+ "collector": "cmst1mgr2.fnal.gov",
+ "constraint": "FERMIHTC_SCHEDD_TYPE=?=\"CMSLPC\""
+}

@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any, Generic, TypeVar
 
 from graphed.core import RunControl, RunState
-from graphed.core.execution import LocalResources, Partition, TaskEvent, TaskPhase, partition_label
+from graphed.core.execution import LocalResources, Partition, TaskEvent, TaskPhase, emit_task, partition_label
 from graphed.debug import StageError
 
 from ._reduce import LazyReducer, running_fold
@@ -59,6 +59,8 @@ MAX_STEAL_BACKOFF = 0.1
 # where a peer stopped reading for good and the parked pipe write can never complete — the actor must
 # still return so the pool can be torn down, and the driver must still reach its own teardown.
 OUTBOX_EXIT_WAIT_S = 5.0
+# How long a failed run's driver keeps forwarding event batches that land after the failure surfaced.
+ERROR_EVENT_DRAIN_S = 0.5
 # Serialize the off-thread profiler at most ~1/s (its sampler keeps running continuously; only the
 # flush + ship is throttled), never per leaf — the M37 R20.7 discipline.
 PROFILE_FLUSH_INTERVAL = 1.0
@@ -494,6 +496,10 @@ def process_and_reduce(
     profiler_factory: Callable[[], Any] | None = None,
     prebuffered: Sequence[tuple[str, Any]] = (),
     close_resources: bool = True,
+    monitor_factory: Callable[[], Any] | None = None,
+    lean: bool = False,
+    keys: Sequence[int] | None = None,
+    complete: bool = False,
 ) -> dict[str, int]:
     """The per-worker actor: run ``process`` on its leaves, peer-reduce over the transport, and return
     witness counters. Runs in a thread (ThreadExecutor) or a worker process (ProcessExecutor).
@@ -510,7 +516,12 @@ def process_and_reduce(
     sends is capped (``OUTBOX_EXIT_WAIT_S``) and an abandoned write dies with the worker process.
 
     ``resources`` (its ``open_once`` cache) is supplied by the caller; ``close_resources=False`` keeps
-    it open across runs (a persistent pool reusing file handles, like the hub path)."""
+    it open across runs (a persistent pool reusing file handles, like the hub path).
+
+    ``emit`` events carry ``keys[leaf]`` (the leaf index without ``keys``); ``lean`` drops STARTED and
+    the label; a ``monitor_factory`` builds this actor's own monitor, which then gets the task events
+    and profile trees that would otherwise ship to the driver. ``complete`` makes a failing actor wait,
+    bounded, for its queued sends (its last event batch included) before it raises."""
     outbox = _Outbox(transport)  # the reducer's node/root sends go through it too
     reducer: PeerReducer[R] = PeerReducer(address, outbox, n, bounds, worker_addresses, combine)
     mine: deque[tuple[int, Partition]] = deque(items)  # leaves to PROCESS (own + stolen)
@@ -528,13 +539,27 @@ def process_and_reduce(
     done = False
     paused = cancelled = False  # the driver's run-control tags (plan-A2 A2-2)
     events: list[TaskEvent] = []  # M37 monitor events, batched to the driver off the hot path
+    monitor = None
+    if monitor_factory is not None:
+        with contextlib.suppress(Exception):  # a monitor that won't build just disables telemetry
+            monitor = monitor_factory()
 
     def emit_event(phase: TaskPhase, leaf: int, part: Partition, error: str | None = None) -> None:
-        events.append(
-            TaskEvent(
-                phase, leaf, address, time.perf_counter(), partition_label(part), part.n_entries, error=error
-            )
+        if lean and phase is TaskPhase.STARTED:
+            return
+        ev = TaskEvent(
+            phase,
+            leaf if keys is None else keys[leaf],
+            address,
+            time.perf_counter(),
+            "" if lean else partition_label(part),
+            part.n_entries,
+            error=error,
         )
+        if monitor is not None:
+            emit_task(monitor, ev)
+        else:
+            events.append(ev)
 
     def ship_events() -> None:
         if events:
@@ -551,7 +576,10 @@ def process_and_reduce(
             profiler.start()
 
     def ship_profile(payload: bytes | None) -> None:
-        if payload:
+        if payload and monitor is not None:
+            with contextlib.suppress(Exception):
+                monitor.on_profile(address, payload)
+        elif payload:
             outbox.send(DRIVER, ("profile", address, payload))
 
     def owner(leaf: int) -> str:
@@ -582,8 +610,10 @@ def process_and_reduce(
             # steal attempts cost ~nothing. (`len > 1`: never give away the leaf I'm about to run.)
             # Each grant carries its own id (a negative level, never a node's), so the thief keeps a
             # response retried by an at-least-once transport once, and a leaf granted twice twice.
+            # Only an owned leaf is granted: the thief returns it to its owner, and the victim is the
+            # only owner guaranteed to be in the thief's bounded overlay.
             thief = payload[1]
-            if steal and len(mine) > 1:
+            if steal and len(mine) > 1 and owner(mine[-1][0]) == address:
                 stats["given"] += 1
                 outbox.send(thief, ("steal_resp", [mine.pop()], (-1 - me, stats["given"])))
             else:
@@ -669,9 +699,10 @@ def process_and_reduce(
                 ship_profile(profiler.stop())  # final sample tree + join the sampler thread
         send_error = outbox.close(OUTBOX_EXIT_WAIT_S)  # let the queued sends land, but never hang here
     except BaseException:
-        # this run is already failing: don't wait on sends to a peer that may never read again, and
-        # don't let a send failure displace the actor's own exception.
-        outbox.close(0.0)
+        # this run is already failing: don't wait on sends to a peer that may never read again (unless
+        # the monitor asked for complete events), and don't let a send failure displace the actor's
+        # own exception.
+        outbox.close(OUTBOX_EXIT_WAIT_S if complete else 0.0)
         raise
     finally:
         if close_resources:
@@ -729,6 +760,10 @@ def pinned_peer_actor(
     steal: bool = True,
     emit: bool = False,
     profiler_factory: Callable[[], Any] | None = None,
+    monitor_factory: Callable[[], Any] | None = None,
+    lean: bool = False,
+    keys: Sequence[int] | None = None,
+    complete: bool = False,
 ) -> dict[str, int]:
     """One run of the pinned worker: peer-reduce its leaves over the inherited transport, return the
     witness (the call's Future carries it back, and re-raises a worker error intact — M6/M7)."""
@@ -748,6 +783,10 @@ def pinned_peer_actor(
         steal_peers=steal_peers,
         emit=emit,
         profiler_factory=profiler_factory,
+        monitor_factory=monitor_factory,
+        lean=lean,
+        keys=keys,
+        complete=complete,
         close_resources=False,
     )
 
@@ -781,6 +820,10 @@ def pooled_peer_actor(
     steal: bool = True,
     emit: bool = False,
     profiler_factory: Callable[[], Any] | None = None,
+    monitor_factory: Callable[[], Any] | None = None,
+    lean: bool = False,
+    keys: Sequence[int] | None = None,
+    complete: bool = False,
 ) -> dict[str, int]:
     """Picklable pool entry point: resolve this actor's inbox/outboxes from the inherited full registry
     (set by :func:`peer_pool_init`) keyed by ``address``, then delegate to :func:`ipc_peer_actor`. Any
@@ -801,6 +844,10 @@ def pooled_peer_actor(
         steal=steal,
         emit=emit,
         profiler_factory=profiler_factory,
+        monitor_factory=monitor_factory,
+        lean=lean,
+        keys=keys,
+        complete=complete,
     )
 
 
@@ -817,6 +864,10 @@ def ipc_peer_actor(
     steal: bool = True,
     emit: bool = False,
     profiler_factory: Callable[[], Any] | None = None,
+    monitor_factory: Callable[[], Any] | None = None,
+    lean: bool = False,
+    keys: Sequence[int] | None = None,
+    complete: bool = False,
 ) -> dict[str, int]:
     """Module-level (picklable) IPC actor: build the queue transport from the ``inbox``/``outboxes``
     handed in, then process + peer-reduce. The ``ProcessExecutor`` peer path uses
@@ -836,6 +887,10 @@ def ipc_peer_actor(
         steal=steal,
         emit=emit,
         profiler_factory=profiler_factory,
+        monitor_factory=monitor_factory,
+        lean=lean,
+        keys=keys,
+        complete=complete,
         close_resources=False,
     )
 
@@ -853,6 +908,10 @@ def http_peer_actor(
     steal: bool = True,
     emit: bool = False,
     profiler_factory: Callable[[], Any] | None = None,
+    monitor_factory: Callable[[], Any] | None = None,
+    lean: bool = False,
+    keys: Sequence[int] | None = None,
+    complete: bool = False,
 ) -> dict[str, int]:
     """Module-level (picklable) HTTP actor for ``ProcessExecutor``: bind a loopback server, announce
     ``(host, port)`` to the driver, wait for the assembled registry (buffering any node hand-offs that
@@ -886,6 +945,10 @@ def http_peer_actor(
             steal=steal,
             emit=emit,
             profiler_factory=profiler_factory,
+            monitor_factory=monitor_factory,
+            lean=lean,
+            keys=keys,
+            complete=complete,
             prebuffered=prebuffered,
             close_resources=False,
         )

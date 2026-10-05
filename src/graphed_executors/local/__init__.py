@@ -56,4 +56,4 @@ __all__ = [
     "select_advertise_host",
     "tree_reduce",
 ]
-__version__ = "0.0.3"
+__version__ = "0.0.4"

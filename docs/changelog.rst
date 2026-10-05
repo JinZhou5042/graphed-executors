@@ -1,6 +1,131 @@
 What changed
 ============
 
+Unreleased
+----------
+
+Run on an HTCondor pool
+~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``htcondor_runner(site=..., n_pilots=N)`` in ``graphed_executors.htcondor_backend`` (the
+  ``[htcondor]`` extra) submits pilot jobs through the HTCondor bindings and runs your plan on them:
+  no dask scheduler or parsl interchange to start. Sites ``lpc``, ``lxplus`` and ``generic`` come
+  built in; ``SiteProfile`` describes your own. ``LocalPilots`` runs the same pilots as local
+  processes. A lost pilot's task is re-run once on another pilot, and a plan whose functions a pilot
+  cannot import is refused before anything is submitted. See :doc:`htcondor`.
+* ``submit_driverless(plan, site=..., n_pilots=N)`` runs the driver itself as one HTCondor job, so
+  the run needs no login session: its pilots run in the job's own slot (``pilots="local"``, the
+  LPC's way) or as jobs it submits (``pilots="condor"``, e.g. lxplus). The ``RunHandle`` it returns
+  reports the job's status, waits, and fetches the result, and saves to JSON for a later session.
+  ``SiteProfile`` gains ``worker_ports``, ``service_ports`` and ``jobs_can_submit``. See
+  :doc:`htcondor`.
+
+Services a plan calls
+~~~~~~~~~~~~~~~~~~~~~
+
+* ``SubmitRunner`` (and ``dask_runner``, ``parsl_runner``, ``htcondor_runner``) resolves the services
+  a plan declares (``plan.services``, graphed's ``ServiceSpec``) for each run: an endpoint you pass
+  as ``services={name: "scheme://host:port"}``, else the site's (``SiteProfile.services``; the
+  ``lpc`` row names the EAF inference server), else one it starts beside the driver from the spec's
+  recipe and stops when the run ends. Each endpoint is checked (``tcp``, ``http:<path>`` or the gRPC
+  health check) where it runs and from a worker before the first task, bound into the plan, and the
+  run's value is resolved while the services are up. ``ServiceSet`` keeps services warm across
+  plans; ``graphed_executors.submit.recipes`` has ``triton`` and ``http_server`` recipes. See
+  :doc:`htcondor`.
+* ``submit_driverless(..., services=)`` passes endpoints to a driverless run, whose driver job
+  resolves the rest with its own site row; a service it cannot reach or start exits 1 and is
+  retried. A ``result.pkl`` that does not load in your session raises a ``RuntimeError`` naming the
+  load error and ``driver.log``.
+* The runners that resolve no services (the local executors, the peer reductions) refuse a plan
+  whose services are unbound before running any task.
+* A service whose recipe needs an image or a GPU runs as a job of its own on an HTCondor pool, beside
+  the pilots: it announces its endpoint to the runner, is checked like any other, and is removed when
+  the run ends. Its command runs in a directory that holds exactly the recipe's inputs, so a recipe
+  names its inputs by basename (``triton(..., model_repository="models")``). See :doc:`htcondor`.
+* ``submit_driverless`` runs such a plan as a DAG: the driver plus one ``SERVICE`` node per service,
+  in a new ``<log_dir>/graphed-<nonce>/`` per run (the handle's ``log_dir``). ``SiteProfile`` gains
+  ``job_root``, the tree a site's jobs read directly (``/afs`` on lxplus, any path on ``generic``,
+  none on the LPC): a DAG's directory, ``user_modules`` and service inputs must lie under it, and
+  ``pilots="condor"`` now reads it too, so a site row without one refuses self-submission.
+  ``RunHandle`` gains ``dag``; a handle saved before loads as before. A ``user_modules`` path holding
+  ``,`` is refused, since it would split the job's input list.
+* A service starts only where it can run. ``htcondor_runner(..., service_hosts=)`` narrows where the
+  runner may start services (``("driver",)``, ``("cluster",)``). A service beside the driver must
+  fit, with the others there, in ``backend.driver_memory_mb`` (a driver job's slot ``Memory``) or else
+  the host's physical memory; one that does not runs on the cluster or is refused with the sizes
+  named. A cluster service job no slot of the pool can ever match is removed before it runs and
+  refused naming its requests and the largest slot; one waiting for a busy slot waits without a
+  deadline, logged every 30 seconds, and its ``timeout_s`` counts from its start. A run's service jobs
+  are submitted before its pilots, a later plan's wait with the runner's queued pilots held, and
+  ``runner.close()`` waits for a server still waiting for its slot; Ctrl-C ends the wait and removes
+  the run's jobs. See :doc:`htcondor`.
+* Histograms on histserv servers (``graphed_histogram.histserv``) run on every runner here: their
+  servers are services the runner starts beside the driver or as cluster jobs sized to them, and the
+  value holds the histograms read back from them. See :doc:`htcondor`.
+* A driverless run's ``extra_submit`` reaches the pilot jobs its driver job submits
+  (``pilots="condor"``) as well as the driver job and its service nodes, as ``htcondor_runner``'s
+  reaches its pilots.
+* A driverless driver killed before it writes a result (out of memory, a signal, no interpreter) is
+  retried like exit 1 instead of being held; after the last try ``result()`` raises ``RuntimeError:
+  the driver exited before writing a result; see driver.log``.
+* ``SubmitRunner`` (so ``dask_runner``, ``parsl_runner`` and ``htcondor_runner``, and
+  ``submit_driverless`` through its driver) runs a join or repartition plan (graphed's ``join_plan``
+  / ``shuffle_plan``, a ``DurablePlanV2``) stage by stage, with its services, so a service call can
+  come before the join. The local executors and the peer reductions refuse one with a ``TypeError``
+  naming ``SubmitRunner``. Its stage functions travel by value, so on HTCondor too (``htcondor_runner``,
+  ``submit_driverless``) they may be lambdas or live in ``__main__``. See :ref:`design-join-plan`.
+* This needs ``graphed.services``, which no graphed release has yet (0.0.6 does not): CI installs
+  graphed from git, and graphed-executors will not be released until its ``graphed`` floor moves to
+  the release carrying the service surface and its resolve walk.
+
+An H→γγ analysis on graphed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``examples/hgg``: a HiggsDNA-derived H→γγ inclusive processor translated to graphed, on coffea
+  NanoEvents in graphed mode. One plan over a fileset of MC and data writes the original's parquet
+  part for every chunk and returns each dataset's counters as coffea's Runner accumulates them,
+  and a new CI job checks it against the original script (:doc:`hgg`). It needs graphed's
+  multi-output plans (``aggregate_plan(writes=)``, ``collate``, ``parquet_write``), which CI
+  installs from git until a graphed release carries them.
+* Its value holds seven diphoton diagnostics per dataset (``analysis.DIAGNOSTICS``), filled locally or,
+  with ``plan(..., context=)``, on histserv servers; ``run_local.py`` saves them as UHI JSON, and
+  ``run_lpc.py`` runs the analysis at the LPC from the HiggsDNA sample manifests (:doc:`hgg`).
+
+0.0.4
+-----
+
+Requires ``graphed`` 0.0.6 or later.
+
+Record the next plan while this one runs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``submit(plan)`` on every executor and runner returns a ``concurrent.futures.Future`` at once;
+  ``.result()`` is what ``run(plan)`` returns. Plans run one at a time in submit order, and
+  ``max_in_flight`` (default 2, forwarded by ``dask_runner`` and ``parsl_runner``) bounds how many
+  are submitted and unfinished (#22).
+* A runner reads its ``monitor`` once per run, so swapping the monitor while plans are queued no
+  longer sends a running plan's events to the new one, and ``Dashboard.attach`` now reaches a
+  ``SubmitRunner`` (#22).
+
+Pause, resume and cancel
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``ThreadExecutor``, ``ProcessPoolExecutor`` and ``PinnedPoolExecutor`` take ``control=``, a
+  ``graphed.core.RunControl``, on every route (#23), and ``SubmitRunner`` — so the dask and parsl
+  runners — honours one too (#24). A pause starts no new task until you resume; a cancel lets
+  running tasks finish and returns the merge of those that completed, with
+  ``stopped=StopReason.CANCELLED``. ``Dashboard(control=True).attach(runner)`` wires the buttons.
+
+Watching a run
+~~~~~~~~~~~~~~
+
+* The executors and ``SubmitRunner`` honour a monitor's lean events and per-worker connections:
+  with ``graphed.debug.NetworkMonitor(url, lean=True, per_worker=True)`` each worker process sends
+  its own events to the dashboard, one per task (#27).
+* A monitor that asks for every event (``graphed.debug.RunRecorder`` does) gets all of a run's
+  events by the time ``run()`` returns or raises, so a report taken then covers that run alone
+  (#28).
+
 0.0.3
 -----
 

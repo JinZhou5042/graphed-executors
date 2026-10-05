@@ -1,5 +1,5 @@
-# `graphed` is pinned to the same release CI installs (env.GRAPHED in ../.github/workflows/ci.yml)
+# `graphed` is pinned to the same commit CI installs (env.GRAPHED in ../.github/workflows/ci.yml)
 # so the rendered API reference matches the version these pages were written against.
 # The [awkward,numpy] extras supply the backends that graphed-executors' autosummary imports at
 # doc-build time.
-graphed[awkward,numpy]==0.0.5
+graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@a51bee4ff0b40c33cd68cca593f8a74c11d9f516

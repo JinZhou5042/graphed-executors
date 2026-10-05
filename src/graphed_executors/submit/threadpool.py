@@ -52,6 +52,10 @@ class ThreadBackend:
         worker_file_cache=False,
     )
 
+    # a service beside the driver is reached by in-process workers on loopback (the service set's
+    # duck-typed ``advertise_host``)
+    advertise_host = "127.0.0.1"
+
     def __init__(self, max_workers: int = 2) -> None:
         self._max_workers = max_workers
         self._pool = ThreadPoolExecutor(max_workers=max_workers)

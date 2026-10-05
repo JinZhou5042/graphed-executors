@@ -25,7 +25,9 @@ from typing import Any
 
 from graphed.core.execution import Plan
 from graphed.debug import SourceFrame, StageError
+from graphed.services import require_bound
 
+from graphed_executors.common import refuse_staged
 from graphed_executors.common.http_plane import EscalatingHttpTransport
 from graphed_executors.common.transport_run import (
     TransportExecResult,
@@ -367,6 +369,8 @@ def parsl_run_plan(
     ``root_timeout_s`` bounds the driver's wait for the reduction root — raise it for a legitimately
     long reduction (m44 parity); the peer lost-done ``idle_deadline_s`` is DERIVED as
     ``root_timeout_s + slack`` so it always stays ≥ the root wait (§1.4)."""
+    refuse_staged(plan, "parsl_run_plan", "ParslBackend(executor)")
+    require_bound(plan)  # resolves no services: an unbound plan is refused before any task
     tasks = sorted(plan.tasks, key=lambda t: t.key)
     n = len(tasks)
     witness = TransportWitness()

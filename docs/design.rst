@@ -304,9 +304,9 @@ somewhere else. Stealing one at a time from a randomly chosen victim is the sche
 bounds on the time wasted stealing (Blumofe–Leiserson, as in Cilk).
 
 Stealing moves only the ``process`` work. The leaf's original owner still merges it — the thief
-ships the partial back — so the tree, and the answer, are untouched. An idle delay plus
-exponential backoff makes it cost nothing on balanced work while still rebalancing a genuine
-straggler. Pass ``steal=False`` to turn it off.
+ships the partial back, and never hands a stolen leaf on — so the tree, and the answer, are
+untouched. An idle delay plus exponential backoff makes it cost nothing on balanced work while
+still rebalancing a genuine straggler. Pass ``steal=False`` to turn it off.
 
 
 Growing the work while the run is going
@@ -385,11 +385,34 @@ to the driver in batches, so no task ever pays an inter-process round trip on it
 A driver-side collector thread replays them into your monitor. A per-worker sampling profiler,
 if you supply one through the monitor's ``worker_profiler_factory``, rides the same channel.
 
+Two opt-in switches trim what watching costs; ``graphed.debug.NetworkMonitor(url, lean=True,
+per_worker=True)`` is the dashboard's monitor with both, and graphed's debugging guide says what
+each one trades away in the figures you see.
+
+* **Lean events** (a monitor carrying ``lean_events = True``): each worker sends one event per
+  task, the ``FINISHED`` or ``ERRORED``, and formats no partition label. The driver's
+  ``SUBMITTED`` still carries the label.
+* **A connection per worker** (a monitor whose ``worker_monitor_factory()`` returns a picklable
+  factory): every worker process — in a process pool, on a peer route, or in a dask or parsl run —
+  builds its own monitor from the factory and sends its task events and profile trees straight
+  to the dashboard instead of through your driver, which keeps the ``SUBMITTED`` events.
+  ``ThreadExecutor`` workers share the driver's process and keep calling the driver's monitor. A
+  kept pool (``persistent=True``) is restarted when the monitoring it was started with changes.
+
+With no monitor attached, workers build no event and format no label.
+
 The property that makes this safe to leave on is that emission is **best-effort and drops when
 full**. A slow monitor never becomes back-pressure that changes task timing — which would in
 turn change what the adaptive path decides — and a monitor that raises is swallowed. A run's
 result and its merge count are byte-identical whether a monitor is attached, absent, or actively
 throwing.
+
+A report of a run needs every event, not most of them. ``graphed.debug.RunRecorder`` asks for
+that (it carries ``complete_events = True``), and the executors then deliver a run's events by the
+time ``run()`` returns or raises. On the hub routes a failed run first finishes the tasks it had
+already handed out; on the peer routes, a run failed by a raising task delivers that task's events
+before it raises. A crashed worker ships nothing. A kept process pool that may still be shipping
+an earlier run's events is shut down and respawned before such a run starts.
 
 
 Pausing and cancelling a run
@@ -430,27 +453,25 @@ which prints::
 
 Where the executor looks at the control depends on who merges:
 
-* **Hub** (``comms=None``, with or without ``pooled_combines``) and **adaptive** plans: without a
-  control every task goes to the pool at once. With one, the driver hands out at most
-  ``max_workers`` tasks at a time and refills a slot as a task finishes, only while the control
-  is ``RUNNING``, so a pause holds everything not yet handed out. A process pool may already
-  have queued up to ``max_workers`` of them, and those still start.
-* **Peer** (``comms="ipc"``/``"http"``, and ``PinnedPoolExecutor``): the driver passes each state
-  change to every worker, and a worker acts on it between two of its own tasks. On a cancel each
-  worker hands the driver its finished pieces of the merge tree, and the driver merges them.
-  A peer run's root deadline counts only time spent running, so a long pause never times it out.
-* **SubmitRunner** (thread, dask and parsl backends), fixed and adaptive plans: with a control, the driver
-  hands out at most as many tasks as the backend has task slots (``task_slots()`` where the backend has it:
-  the dask cluster's threads, the connected parsl HTEX workers or the parsl thread pool's size;
-  else ``n_workers()``), and at least one, so a pool that starts with no workers runs one task
-  until workers join. While it holds tasks the driver wakes every 50 ms and, when every slot is
-  busy, reads the slot count again, so it widens as workers join and a resume starts tasks without
-  waiting for one to finish. A merge is submitted only once both of its inputs have finished. On
-  dask every task depends on the broadcast plan function, and dask runs a task where its input
-  lives, so a controlled dask run should use ``dask_runner(client, replicate_broadcast=True)``;
-  without it, tasks queue on the worker holding the broadcast while other slots stay idle. Like
-  ``monitor``, ``control`` is read when a plan starts, so assigning it mid-run takes effect from
-  the next plan.
+* **Hub and adaptive runs** (``comms=None``, with or without ``pooled_combines``, or a plan with
+  ``next_tasks``): with a control, the driver hands out at most ``max_workers`` tasks at a time
+  and refills a slot only while the control is ``RUNNING``, so a pause holds everything not yet
+  handed out. A process pool may already have queued up to ``max_workers`` of them, and those
+  still start.
+* **Peer runs** (``comms="ipc"``/``"http"``, and ``PinnedPoolExecutor``): every worker hears each
+  pause, resume and cancel and acts on it between two of its own tasks. On a cancel each worker
+  hands the driver its finished pieces of the merge tree, and the driver merges them. A long pause
+  never times a peer run out.
+* **SubmitRunner** (thread, dask and parsl backends): the driver hands out at most as many tasks
+  as the backend has task slots — at least one — and widens as workers join, so a resume starts
+  tasks without waiting for one to finish. A merge is submitted once both its inputs have
+  finished. On dask, give a controlled run ``dask_runner(client, replicate_broadcast=True)``:
+  every task reads the plan's functions from one broadcast copy, and dask runs a task where its
+  input lives, so without replicas the tasks queue on the worker holding that copy while other
+  slots stay idle.
+
+Like ``monitor``, ``control`` is read when a plan starts, so assigning it mid-run takes effect from
+the next plan.
 
 On the fixed-tree and peer routes, a cancelled run's total is the fixed merge tree over the tasks
 that finished: every merge whose two inputs completed runs, and the pieces left over are added in
@@ -531,6 +552,103 @@ correctness and development path, not a way to use a whole node. ``run_repartiti
 adds a target block size for when your key distribution is skewed. The relational join,
 ``run_join``, is implemented in the same module but is not currently re-exported from
 ``graphed_executors.local``; import it from ``graphed_executors.local.shuffle`` until it is.
+
+.. _design-join-plan:
+
+Running a join or repartition plan
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The engines above take blocks you already hold. A join or repartition you recorded in graphed is
+a plan instead (``graphed.join_plan`` / ``graphed.shuffle_plan``, a ``DurablePlanV2``): map stages
+that read your sources and evaluate everything up to the exchange, gather stages that join or
+collect each destination and evaluate what you recorded after it, and optionally a one-task fold.
+``SubmitRunner`` runs one on any backend (``dask_runner``, ``parsl_runner`` and ``htcondor_runner``
+included), with the plan's services resolved and bound as for any plan, so a service call can come
+before the join. Functions the plan cannot import go to the workers by value, so they may be
+lambdas or live in ``__main__``, on HTCondor pilots (``htcondor_runner``, ``submit_driverless``) as
+on any backend. With the call in ``sf_client.py``:
+
+.. code-block:: python
+
+   import urllib.request
+
+   import awkward as ak
+   from graphed.preserve import ExternalPlugin, sha256_bytes
+
+
+   def scale(resource, params, inputs):  # params["url"] is the endpoint the run binds
+       with urllib.request.urlopen(params["url"] + "/sf") as resp:
+           factor = float(resp.read())
+       return ak.with_field(inputs[0], inputs[0].MET_pt * factor, "MET_pt")
+
+
+   def samples():
+       return [b"sf-v1", b"sf-v2"]
+
+
+   SF = ExternalPlugin(kind="sf", content_hash=sha256_bytes, evaluate=scale, samples=samples)
+
+and a stand-in server answering ``2``:
+
+.. code-block:: python
+
+   import tempfile
+   import threading
+   from http.server import BaseHTTPRequestHandler, HTTPServer
+
+   import awkward as ak
+   from graphed import Session, join, join_plan
+   from graphed.awkward import AwkwardBackend, from_parquet
+   from graphed.preserve import record_external
+   from graphed.services import ServiceSpec
+   from graphed_executors.submit import SubmitRunner, ThreadBackend
+
+   from sf_client import SF
+
+
+   class Answer2(BaseHTTPRequestHandler):
+       def do_GET(self):
+           self.send_response(200)
+           self.end_headers()
+           self.wfile.write(b"2")
+
+       def log_message(self, *args):
+           pass
+
+
+   server = HTTPServer(("127.0.0.1", 0), Answer2)
+   threading.Thread(target=server.serve_forever, daemon=True).start()
+
+   root = tempfile.mkdtemp()
+   ak.to_parquet(ak.Array({"run": [1, 1, 2], "MET_pt": [10.0, 20.0, 30.0]}), f"{root}/events.parquet")
+   ak.to_parquet(ak.Array({"run": [1, 2], "lumi_w": [0.9, 1.1]}), f"{root}/lumi.parquet")
+
+   s = Session(AwkwardBackend())
+   s.declare_service(ServiceSpec("sf", "http", check="http:/"))
+   events = from_parquet(s, "events", f"{root}/events.parquet")
+   lumi = from_parquet(s, "lumi", f"{root}/lumi.parquet")
+   scaled = record_external(s, SF, b"sf-v1", [events], params={"service": "sf"})
+   joined = join(scaled, lumi, on=["run"], how="inner")
+   plan = join_plan(joined.MET_pt * joined.lumi_w)
+
+   endpoint = f"http://127.0.0.1:{server.server_port}"
+   with SubmitRunner(ThreadBackend(2), services={"sf": endpoint}) as runner:
+       result = runner.run(plan)
+   print([(st.kind, len(st.tasks)) for st in plan.stages])
+   print(result.value)
+   server.shutdown()
+
+.. code-block:: text
+
+   [('map_write', 1), ('map_write', 1), ('gather_join', 1)]
+   (<Array [18, 36, 66] type='3 * float64'>,)
+
+Each stage goes out once the stages it reads have finished. A map task's output reaches each
+gather as that gather's slice alone: where the backend moves data between workers (dask,
+``ThreadBackend``) a small pick task beside the map cuts it, and where it does not (parsl HTEX,
+HTCondor) the driver fetches each map result once and cuts it there. The local executors and the
+peer reductions (``transport_run_plan``, ``parsl_run_plan``) run single-stage plans only and
+refuse a join plan with a ``TypeError`` naming ``SubmitRunner``.
 
 .. _design-transport-engine:
 
@@ -803,23 +921,95 @@ choice would also tell the scheduler-graph engine that peer movement exists, and
 route every block through your submit node believing otherwise.
 
 
+On an HTCondor pool
+~~~~~~~~~~~~~~~~~~~
+
+``graphed_executors.htcondor_backend`` (the ``[htcondor]`` extra) needs no cluster software between
+you and the batch system: it submits its own worker jobs through the HTCondor bindings. :doc:`htcondor`
+is the how-to; the design points that matter are these.
+
+**Pilots pull; nothing is pushed to them.** A batch slot can start minutes after you submit and
+sit behind a firewall that refuses inbound connections, so the workers dial out. Each pilot job
+calls a small HTTP task server in your session, asks for the next task, runs it, and posts the
+result back (a pilot job). An idle pilot waits on its request for up to ten seconds and asks again,
+so a new task starts as soon as one is queued, and closing the runner answers every waiting pilot
+at once.
+
+**Your session hands each merge its inputs.** A merge is queued only when both partial results it
+needs have come back, and it is sent out with those two values in it. Pilots never address each
+other, so this is the all-false capability floor again, as on parsl: the grouping and the answer
+are the fixed tree, and every partial crosses your session.
+
+**A lost pilot costs one retry, not the run.** Each pilot sends a heartbeat every five seconds. One
+silent for 30 seconds is lost — six missed beats, which rides out a task that holds the interpreter
+and a short network drop. The task it held goes back to the front of the queue for another pilot;
+a second loss of the same task fails it with the partition and the pilot's ``host:pid:token``, and so
+fails the run through the same path a dying dask worker takes. A task is never run a third time,
+so a partition that kills every process it touches cannot eat the pool. When no pilot is connected
+and HTCondor reports none queued or running, the waiting tasks fail at once rather than wait for a
+pilot that will never come.
+
+**Only your pilots get tasks.** The task server's port is reachable from the whole pool, and a task
+is a pickle, which runs code when it is read. So every run makes its own secret, ships it to the
+pilots as a file only you can read — never in the job's arguments or environment, which anyone can
+see with ``condor_q -long`` — and every request is signed with it. The server checks the signature
+before it reads the request's contents; a request without it is refused unread.
+
+**Driverless: the driver is a job too.** ``submit_driverless`` ships the runtime ``Plan`` as a
+stdlib pickle, with ``run.json`` naming the pilots, site and limits, in one job whose entry point
+builds the same ``HTCondorRunner`` there — over pilots in its own slot, or over pilot jobs it
+submits to the schedd your session chose, found by name through the collector because a job has no
+local schedd. Nothing about the run changes but where the driver lives, so the answer is the same
+bit for bit. The plan is pickled, not written as a ``DurablePlan``: no executor accepts that, and
+the job needs the plan's functions, which the pickle names. The exit code says who fails the run: a
+plan error (3) is deterministic and ends HTCondor's retries; anything else (1), lost workers
+included, is retried. A driver killed before it writes its result is retried too: the job's script
+writes a placeholder result before Python starts, because HTCondor holds a job whose declared outputs
+are missing. A plan with a service that needs an image or a GPU goes as a DAG instead: that job as
+its ``driver`` node beside one ``SERVICE`` node per such service, each announcing to whichever try of
+the driver is running. The run's outcome is the driver node's last try, never DAGMan's own exit,
+which depends on how strictly the site's DAGMan treats service nodes still idle or held at the end.
+A ``RunHandle`` is a few fields of JSON, so another session can pick the run up.
+
+**Services: an analysis names them, a run finds them.** A plan's ``services`` are requirements
+(graphed ``ServiceSpec``: a name, a kind, a readiness check, optionally a launch recipe); the endpoint
+a run reaches one at is environment, never graph identity. ``SubmitRunner`` resolves each for every
+run, on any backend, by three legs in order — an endpoint the user gave, the site's endpoint for the
+kind, a managed start — and names every leg and why it did not apply when none does. It checks each
+endpoint where it runs and then from a worker, through an ordinary task, because a service the driver
+reaches may be firewalled from the execute nodes; a managed one must answer a worker on another host
+than its own unless that host is the driver's. The endpoints are bound into the plan before its first
+task and the value is resolved while the services are still up. A run's services, its probe tasks and
+its queued tasks live exactly as long as the run: every acquisition registers its release when it
+returns, and each release logs its failure instead of raising, so the error you see is the first one.
+The engine names no service; the recipes are plain data in ``graphed_executors.submit.recipes``.
+Cluster hosting is one duck-typed seam, a backend's ``host_service``/``release_service`` pair. The
+HTCondor backend fills it with a job per service that announces its endpoint, signed with a secret
+made for that one service (never the pilots' secret, which signs pickles), from a directory that holds
+only the recipe's inputs.
+
 Not supported yet
 -----------------
 
-* **Checkpoint and resume on a cluster.** ``graphed.checkpoint.run_resumable`` and
-  ``run_shuffle_resumable`` are self-driving loops over a content-addressed store on the local
-  filesystem; they are not runners, so there is no ``run_resumable(executor=dask_runner(...))``.
-  Resumable execution on a cluster needs a distributed store first. Checkpoint locally, or
-  partition your run into pieces you can resubmit.
+* **Resuming a killed cluster run.** A dask or parsl run that dies starts over.
+  ``graphed.checkpoint.run_resumable`` and ``run_shuffle_resumable`` resume — against a local
+  directory or a store at a URL any machine can reach — but they drive the partitions themselves,
+  one at a time; they are not runners, so there is no ``run_resumable(executor=dask_runner(...))``.
+  Use them where surviving a crash matters more than wall time, or split your run into pieces you
+  can resubmit.
 * **TaskVine and Work Queue.** ``ParslBackend`` refuses executor types it has not verified
   rather than guessing a capability vector, so those raise a ``TypeError`` naming the two
   supported classes. Use HTEX.
-* **Direct HTCondor and SLURM submission.** There is no batch-system executor here; go through
-  dask-jobqueue, as in the recipes above, or a provider in your own parsl config.
+* **Direct SLURM submission.** There is no SLURM executor here; go through dask-jobqueue, as in
+  the recipes above, or a provider in your own parsl config.
 * **TLS on graphed's own HTTP exchange plane.** parsl's ``encrypted=True`` covers parsl's
   channels, not this one. Keep an exchange inside a trusted network.
-* **Live monitoring during a parsl run.** Worker events are buffered and delivered when a task
-  completes, so a dashboard over parsl updates per task rather than continuously.
+* **Live monitoring during a parsl run, by default.** Worker events are buffered and delivered
+  when a task completes, so a dashboard over parsl updates per task rather than continuously —
+  unless the monitor gives each worker its own connection (``per_worker=True``) and the workers
+  can reach the dashboard.
+* **Pausing or cancelling the worker-to-worker routes.** ``transport_run_plan``,
+  ``parsl_run_plan`` and the exchange engines take no control; interrupt such a run instead.
 * **Free-threaded CPython on the dask path**, as above.
 * **Convergence-based stopping.** ``next_tasks`` can stop a run on elapsed time, task counts or
   errors; stopping when a measurement reaches a target precision is not implemented.

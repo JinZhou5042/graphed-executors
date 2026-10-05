@@ -305,13 +305,25 @@ events and they arrive when that task's result is unwrapped. You see the run tas
 complete, not live within a task. As on every backend, emission is off the data path: your result
 is byte-identical whether a monitor is attached, absent, or raising on every event.
 
+To watch tasks while they run, start a ``graphed.debug.DashboardServer`` and pass
+``NetworkMonitor(server.ingest_url, per_worker=True)`` as the monitor. Each HTEX worker then opens
+its own connection to the dashboard and sends its events as they happen, instead of handing them
+back with its result — provided the workers can reach the dashboard's address, which on a batch
+site means a host and port the compute nodes can dial.
+
+The runner ``parsl_runner`` returns also honours a ``graphed.core.RunControl``, the same way as on
+dask and on your laptop: a pause starts no new task until you resume, and a cancel lets the
+running tasks finish and returns the merge of those that completed, with
+``stopped=StopReason.CANCELLED``. ``Dashboard(control=True).attach(runner)`` puts the buttons on
+the page. The repartition and join engines take no control.
+
 
 Not supported yet
 -----------------
 
-* **Live event delivery.** Events arrive at task completion, as above, so a dashboard fed from a
-  parsl run updates in steps rather than continuously.
+* **Live event delivery through your driver.** Without a per-worker connection, events arrive at
+  task completion, as above, so the dashboard updates in steps rather than continuously.
 * **Windows**, and CPython 3.14 / 3.14t, following parsl's own support.
-* **No checkpoint/resume on a pool.** ``run_resumable`` and ``run_shuffle_resumable`` drive
-  themselves over a content-addressed store on the local filesystem; there is no distributed store
-  behind them yet.
+* **No resume after a crash.** A parsl run that dies starts over. ``graphed.checkpoint``'s
+  ``run_resumable`` resumes, against a local directory or a store at a URL, but runs the
+  partitions itself, one at a time, not on your pool.
