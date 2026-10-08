@@ -299,7 +299,7 @@ def test_the_deadline_outlives_an_eviction(condor: HTCondorBackend, monkeypatch:
 
 
 @pytest.mark.parametrize("locate", [None, ("cm.example:9618", "schedd.example")])
-def test_machine_ads_ask_the_schedd_s_pool_and_drop_dynamic_slots(
+def test_machine_ads_ask_the_schedd_s_pool_for_its_slots_but_dynamic_ones(
     locate: tuple[str, str] | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     asked: list[tuple[Any, ...]] = []
@@ -313,10 +313,10 @@ def test_machine_ads_ask_the_schedd_s_pool_and_drop_dynamic_slots(
         return SimpleNamespace(query=query)
 
     monkeypatch.setattr(launch, "_htcondor", lambda: SimpleNamespace(Collector=collector))
-    got = machine_ads(CondorPilots("generic", schedd_locate=locate))
-    assert [ad["Name"] for ad in got] == ["slot1"]
+    got = machine_ads(locate)
+    assert got == ads
     pool = () if locate is None else (locate[0],)
-    assert asked == [(*pool, 'MyType == "Machine"')]
+    assert asked == [(*pool, 'MyType == "Machine" && SlotType =!= "Dynamic"')]
 
 
 def test_a_partitionable_slot_is_matched_at_its_totals() -> None:

@@ -31,7 +31,7 @@ from graphed_executors.htcondor_backend.driverless import DAG_OPTIONS
 from graphed_executors.htcondor_backend.server import sign
 
 
-def test_a_node_that_never_announces_times_out_and_a_release_drops_its_pending_announce() -> None:
+def test_a_node_that_never_announces_times_out_and_a_release_keeps_its_pending_announce() -> None:
     backend = HTCondorBackend(
         LocalPilots(),
         0,
@@ -51,9 +51,8 @@ def test_a_node_that_never_announces_times_out_and_a_release_drops_its_pending_a
         got = backend.host_service(spec, "scope")
         assert got == ("http://127.0.0.1:4242", "node.m68b.example", "svc0"), "control: an announce resolves"
         assert backend._server.announce(body, sign(secret, body).encode()) == HTTPStatus.OK
-        backend.release_service("svc0")
-        with pytest.raises(TimeoutError, match="svc0"):
-            backend.host_service(spec, "scope")
+        backend.release_service("svc0")  # a restart's announce, pending: the next set resolves it
+        assert backend.host_service(spec, "scope") == got
     finally:
         backend.close()
 

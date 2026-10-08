@@ -184,6 +184,7 @@ def test_watch_mode_retries_a_refused_pair_and_stops_once_it_answers_200(
         return next(answers, 200)
 
     monkeypatch.setattr(ann, "post", post)
+    monkeypatch.setattr(ann, "RESTARTS", 0)  # the child's exit ends the job
     cfg = config(ports, argv=["{python}", "-c", LISTENER, "{port}", "7", "5", "0"], key="svc0", watch="dag")
     (job_dir / "service.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(sys, "argv", ["announce.py", "service.json"])

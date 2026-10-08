@@ -339,7 +339,10 @@ def submit_driverless(
         "min_pilots": min_pilots,
         "retries": retries,
         "max_in_flight": max_in_flight,
-        "schedd_locate": [str(htc.param["COLLECTOR_HOST"]), name] if pilots == "condor" else None,
+        # a DAG's driver also reads its SERVICE nodes' queue ads there
+        "schedd_locate": [str(htc.param["COLLECTOR_HOST"]), name]
+        if pilots == "condor" or (nodes and profile.jobs_can_submit)
+        else None,
         "user_modules": [Path(m).name for m in launcher.user_modules],
         "endpoints": endpoints,
         "announce_only": announce_only,

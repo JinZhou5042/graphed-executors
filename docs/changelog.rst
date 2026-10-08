@@ -65,6 +65,18 @@ Services a plan calls
 * A driverless run's ``extra_submit`` reaches the pilot jobs its driver job submits
   (``pilots="condor"``) as well as the driver job and its service nodes, as ``htcondor_runner``'s
   reaches its pilots.
+* A run over a fixed tree (``SubmitRunner``'s default path) raises at its first failed task instead of
+  after every task has run, and cancels the rest.
+* A task that fails with a service gone raises ``ServiceUnreachable`` naming the service, the worker
+  and the task's exception (a driverless job exits 1 and is retried); a plan error with its services
+  answering is raised as before.
+* On Linux, a started service's port counts only when the started process holds its listener: a port
+  another process bound after the scan is passed over by a cluster service job and refused beside the
+  driver.
+* A driverless DAG's ``SERVICE`` node restarts a service that dies (up to three times, each on a new
+  port), and the driver runs the plan again against the new endpoint (``rerun:`` in ``driver.log``).
+  The driver fails a try at once when a node it waits for left the queue, is held, or could never be
+  matched, and holds its queued ``pilots="condor"`` pilots meanwhile. See :doc:`htcondor`.
 * A driverless driver killed before it writes a result (out of memory, a signal, no interpreter) is
   retried like exit 1 instead of being held; after the last try ``result()`` raises ``RuntimeError:
   the driver exited before writing a result; see driver.log``.

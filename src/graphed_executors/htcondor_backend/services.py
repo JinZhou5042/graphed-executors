@@ -164,37 +164,15 @@ class ServiceJob:
     def match_refusal(
         self, machines: list[Any], claims: Mapping[str, Sequence[Any]] | None = None
     ) -> str | None:
-        """Why no slot of ``machines`` could ever run this queued job, else ``None``: its whole ad (the
-        request, the site's and the user's submit keys) must ``symmetricMatch`` a slot's ad whose free
-        ``Memory``/``Cpus``/``GPUs``/``Disk`` are a partitionable slot's totals, so a busy pool still
-        matches, less what ``claims`` hold there (by holder, the running ads of the runner's pilots, which
-        keep their slots until the runner closes, and of the set's earlier servers, which keep theirs until
-        the run ends); ``None`` when ``machines`` is empty."""
+        """:func:`queued_refusal` of this queued job (its claims, by holder, the running ads of the runner's
+        pilots, which keep their slots until the runner closes, and of the set's earlier servers, which
+        keep theirs until the run ends); ``None`` when ``machines`` is empty or the job left the queue."""
         if not machines:  # a collector that lists no slot says nothing about the pool: submit and wait
             return None
         ads = list(self.launcher._schedd.query(constraint=f"ClusterId == {self.cluster}"))
         if not ads:  # it already left the queue: the announce wait reports how
             return None
-        import classad2  # noqa: PLC0415  (ships with the htcondor2 bindings)
-
-        slots = [_as_whole(classad2.ClassAd(str(machine))) for machine in machines]
-        held = {who: running for who, running in (claims or {}).items() if running}
-        for running in held.values():
-            for claim in running:
-                _less_claim(slots, claim)
-        if any(ads[0].symmetricMatch(slot) for slot in slots):
-            return None
-        asked = ", ".join(f"{a}={ads[0].eval(a) if a in ads[0] else 0}" for a in _REQUESTS)
-        largest = max(int(slot.get("Memory", 0)) for slot in slots)
-        if held:
-            return (
-                f"service job {self.key} matches no slot of the pool beside {' and '.join(held)}: {asked}; "
-                f"the largest slot memory beside them is {largest} MiB"
-            )
-        return (
-            f"service job {self.key} matches no slot of the pool, busy or not: {asked}; "
-            f"the largest slot memory is {largest} MiB"
-        )
+        return queued_refusal(f"service job {self.key}", ads[0], machines, claims)
 
     def stop(self) -> None:
         """Remove the job at once (a service never exits by itself; a spooled job that completed is
@@ -209,13 +187,42 @@ class ServiceJob:
                 (self.dir / SECRET_FILE).unlink(missing_ok=True)
 
 
-def machine_ads(launcher: CondorPilots) -> list[Any]:
-    """The pool's slot ads, dynamic slots dropped, from the collector of ``launcher``'s schedd
-    (``schedd_locate``'s pool, else the default collector)."""
+def queued_refusal(
+    what: str, ad: Any, machines: list[Any], claims: Mapping[str, Sequence[Any]] | None = None
+) -> str | None:
+    """Why no slot of ``machines`` could ever run the queued job whose whole ad is ``ad`` (``what`` names
+    it), else ``None``: the ad (the request, the site's and the user's submit keys) must
+    ``symmetricMatch`` a slot's ad whose free ``Memory``/``Cpus``/``GPUs``/``Disk`` are a partitionable
+    slot's totals, so a busy pool still matches, less what ``claims`` (running ads, by holder) hold there."""
+    import classad2  # noqa: PLC0415  (ships with the htcondor2 bindings)
+
+    slots = [_as_whole(classad2.ClassAd(str(machine))) for machine in machines]
+    held = {who: running for who, running in (claims or {}).items() if running}
+    for running in held.values():
+        for claim in running:
+            _less_claim(slots, claim)
+    if any(ad.symmetricMatch(slot) for slot in slots):
+        return None
+    asked = ", ".join(f"{a}={ad.eval(a) if a in ad else 0}" for a in _REQUESTS)
+    largest = max(int(slot.get("Memory", 0)) for slot in slots)
+    if held:
+        return (
+            f"{what} matches no slot of the pool beside {' and '.join(held)}: {asked}; "
+            f"the largest slot memory beside them is {largest} MiB"
+        )
+    return (
+        f"{what} matches no slot of the pool, busy or not: {asked}; the largest slot memory is {largest} MiB"
+    )
+
+
+def machine_ads(locate: tuple[str, str] | None) -> list[Any]:
+    """The pool's slot ads, dynamic slots dropped, from the collector of the schedd ``locate = (pool,
+    name)`` names (``None``: the default collector)."""
     htc = launch._htcondor()
-    locate = launcher.schedd_locate
     collector = htc.Collector(locate[0]) if locate is not None else htc.Collector()
-    return [ad for ad in collector.query(constraint='MyType == "Machine"') if ad.get("SlotType") != "Dynamic"]
+    # in the collector, where dynamic slots can be most of a pool; `=!=` keeps an ad with no SlotType
+    slots = 'MyType == "Machine" && SlotType =!= "Dynamic"'
+    return list(collector.query(constraint=slots))  # whole ads: the job's Requirements may read any attribute
 
 
 def _as_whole(slot: Any) -> Any:
@@ -290,4 +297,4 @@ def _mirror(inputs: list[str], dest: Path) -> None:
                 os.symlink(os.path.join(root, name), here / name)
 
 
-__all__ = ["ServiceJob", "machine_ads"]
+__all__ = ["ServiceJob", "machine_ads", "queued_refusal"]

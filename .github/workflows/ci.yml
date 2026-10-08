@@ -167,6 +167,7 @@ jobs:
             tests/frozen/m68c/test_m68c_submit_dask.py tests/frozen/m68c/test_m68c_submit_thread.py \
             tests/extra/m43 tests/extra/m44 tests/extra/m68a tests/extra/m68c \
             tests/extra/m69b/test_m69b_schedulable.py tests/extra/m69b/test_m69b_dask_driver_check.py \
+            tests/frozen/m68d tests/extra/m68d \
             --cov-config=.coveragerc-dask \
             --cov-branch --cov \
             --cov-report=term-missing
@@ -356,7 +357,7 @@ jobs:
               time.sleep(5)
           print("Triton ready on grpc://localhost:8001")
           PY
-      - name: Pytest frozen m66 + m67 + m68a + m68b + m68c + m69b on the pool + scoped coverage gate (>=90%)
+      - name: Pytest frozen m66 + m67 + m68a + m68b + m68c + m68d + m69b on the pool + scoped coverage gate (>=90%)
         # a bare `--cov` keeps the rcfile's source; a path-valued one overrides it (see test-parsl)
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/.coveragerc-htcondor
@@ -367,7 +368,7 @@ jobs:
           python -c "import sysconfig, pathlib; pathlib.Path(sysconfig.get_path('purelib'), 'graphed_subcov.pth').write_text('import coverage; coverage.process_startup()\n')"
           pytest tests/frozen/m66 tests/extra/m66 tests/frozen/m67 tests/extra/m67 \
             tests/frozen/m68a tests/extra/m68a tests/frozen/m68b tests/extra/m68b \
-            tests/frozen/m68c tests/extra/m68c \
+            tests/frozen/m68c tests/extra/m68c tests/frozen/m68d tests/extra/m68d \
             tests/frozen/m69b/test_histserv_cluster.py tests/frozen/m69b/test_histserv_managed.py \
             tests/frozen/m69b/test_service_order.py tests/extra/m69b \
             --cov --cov-config=.coveragerc-htcondor \

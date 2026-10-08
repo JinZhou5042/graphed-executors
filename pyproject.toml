@@ -137,10 +137,10 @@ exclude = ['^tests/frozen/m69a/data/inclusive_processor\.py$']
 # sibling helper modules are bases as well, so `import _big_partial` resolves the way pytest's
 # prepend import mode resolves it; the frozen dirs must NOT be, since a base there would put their
 # files back on bare basenames and un-match the override.
-mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54", "examples/hgg"]
+mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54", "tests/extra/m68d", "examples/hgg"]
 explicit_package_bases = true
 
-# Read-only helpers under tests/frozen/{m44,m47,m63,m65,m68c} that tests import by bare basename: pytest
+# Read-only helpers under tests/frozen/{m44,m47,m63,m65,m68c,m68d} that tests import by bare basename: pytest
 # puts them on sys.path, mypy knows them only as tests.frozen.mXX.<name>. They stay type-checked
 # under those dotted names; only the import site is Any.
 [[tool.mypy.overrides]]
@@ -152,6 +152,7 @@ module = [
   "m65a3_bodies",
   "m65b_probe",
   "m68c_harness",
+  "m68d_harness",
 ]
 ignore_missing_imports = true
 

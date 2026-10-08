@@ -342,7 +342,9 @@ It tries three places, in order:
    fails its check is passed over, and the reason is kept.
 3. **One it starts**, from the spec's recipe: beside the driver when the recipe needs no image and
    no GPU and the site lets workers reach the driver's host (``service_hosts``), else as a job of its
-   own on the pool (see `Cluster-hosted services`_). It is stopped when the run ends.
+   own on the pool (see `Cluster-hosted services`_). It is stopped when the run ends. On Linux, a
+   start beside the driver whose port's listener the started process does not hold (another process
+   bound the port after the free-port scan) is refused, since a check passes on any listener.
 
 ``graphed_executors.submit.recipes`` has two recipes as plain data: ``triton(name, image,
 model_repository)`` (gRPC only, one port) and ``http_server(name)`` (Python's ``http.server``).
@@ -362,6 +364,11 @@ answer a pilot on another host than its own, unless that host is the driver's (a
 machine). A service no pilot can reach fails the run with ``ServiceUnreachable`` naming the endpoint, the worker and the reason; ``"no worker
 answered"`` means no pilot ran the probe within that wait, and ``"only same-host
 workers answered"`` that none on another host did.
+
+**Checked again when a task fails.** A task that raises runs the same checks on its pilot. A service
+that no longer answers turns the failure into ``ServiceUnreachable``, whose reason ends with the task's
+own exception; with every service answering, the task's exception is raised as it was. Either way
+the run ends at its first failed task and cancels the tasks still queued.
 
 **Kept warm across plans.** A started service lives as long as the run that started it. To use one
 server for several plans, start it yourself and pass its endpoints to the runner:
@@ -391,7 +398,8 @@ of its own on the pool, next to the pilots, for the length of the run. Every bui
 this (``"cluster"`` is in ``service_hosts`` wherever ``worker_ports`` is set). The job starts a small
 standard-library script (Python 3.9 or later, so it runs in an image with no venv) that takes the
 first free port of the site's ``worker_ports``, starts the recipe's command on it, runs the spec's
-check there, and then *announces* ``host:port`` to the runner's task server, signed with a secret
+check there (on Linux, a port whose listener the command's processes do not hold is passed over for
+the next), and then *announces* ``host:port`` to the runner's task server, signed with a secret
 made for that one service. While the job waits for a slot (idle, or spooling its inputs) the runner
 waits with it, with no deadline (`Schedulability`_), and logs the job's key and
 state on the ``graphed_executors`` logger at first and every 30 seconds; the spec's ``timeout_s``
@@ -431,6 +439,21 @@ there. ``status()`` reports the driver node (``held`` while it is held), and the
 try's exit; a DAG whose driver never returned a result raises ``RuntimeError`` naming
 ``run.dag.dagman.out``.
 
+A service node restarts a command that dies, up to three times, each on a port none of its
+earlier ones served, and announces the new endpoint. A task that then finds the service gone ends the
+run with ``ServiceUnreachable``, and the driver runs the plan again in the same job, against the new
+announce and on the same pilots (``driver.log`` says ``rerun:``); the tasks that had finished run
+again.
+
+While the driver waits for an announce it reads the node's queue ad on the DAG's schedd. A node that
+is held fails the try at once, naming its ``HoldReason``; so does one that left the queue, naming the
+``LastHoldReason`` (else the ``RemoveReason``) of its history row; so does an idle node no slot of
+the pool could ever run, counting the slots the run's own running jobs (and its running pilots) hold,
+named with its ``RequestMemory``, ``RequestCpus`` and ``RequestGPUs``. An idle node that could run
+waits without a deadline, and ``timeout_s`` counts from its start. With ``pilots="condor"``, the
+run's queued pilots are held while a node waits, and released after. Where the schedd cannot be read,
+``driver.log`` says so in one line and the wait is ``timeout_s`` long.
+
 The DAG is not spooled: the schedd and the nodes read the run directory, your ``user_modules`` and
 the services' inputs where they lie, so all of them must lie under the site's ``job_root``
 (``SiteProfile.job_root``: ``/afs`` on lxplus, any path on ``generic``). Anything outside is
@@ -438,9 +461,10 @@ refused before anything is submitted. The LPC has no ``job_root``, so a driverle
 service that would need a node; the inference server its row names still serves that kind (leg 2).
 The check reads the path as written, not where a symlink points: an input under the root that is a
 symlink to a file outside it passes, and if the schedd cannot read that file the node is held. A held
-service node is removed (its ``periodic_remove``); each try of the driver then waits ``timeout_s``
-for its announce, so the run fails after three × ``timeout_s``, as it does for a service node that
-starts but never announces. A held driver node stays ``held`` until you release or remove it.
+service node is removed (its ``periodic_remove``), so each try of the driver that reads the schedd
+fails at once and the run fails after three tries; a service node that starts but never announces
+costs each try ``timeout_s``.
+A held driver node stays ``held`` until you release or remove it.
 
 **On lxplus, with a GPU.** An inference server for your ONNX models in ``models/`` (Triton's layout),
 reached from CPU pilots:

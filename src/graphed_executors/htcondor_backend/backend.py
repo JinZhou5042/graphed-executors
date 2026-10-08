@@ -16,7 +16,9 @@ its ``timeout_s`` counted from its start. A run's service jobs go before its pil
 servers announce before the pilots are submitted, and a later plan's wait with the runner's queued pilots
 held and are matched beside its running ones. In a driver job
 a managed service starts beside the driver, or, when it is one of the run's DAG SERVICE nodes
-(``announced=``), is resolved by that node's announce: the driver job submits no service job.
+(``announced=``), is resolved by that node's announce: the driver job submits no service job, and the
+wait reads the node's queue ad on the DAG's schedd (``schedd_locate=``), so a node that ended, is held,
+or that no slot could ever run fails it at once.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, TypeVar, overload
+from typing import Any, Protocol, TypeVar, overload
 
 from graphed.core.execution import ExecResult, Plan
 from graphed.core.plan import DurablePlanV2
@@ -51,9 +53,9 @@ from graphed_executors.submit.services import (
 
 from . import launch as _launch
 from . import server as _server
-from .launch import CondorPilots, PilotLauncher
+from .launch import CLAIM_ATTRS, CondorPilots, PilotLauncher, located_schedd
 from .server import TaskServer, WorkerLost
-from .services import AD_ATTRS, ServiceJob, machine_ads
+from .services import AD_ATTRS, ServiceJob, machine_ads, queued_refusal
 from .sites import SITES, SiteProfile, counts_as_alive
 
 R = TypeVar("R")
@@ -61,7 +63,9 @@ R = TypeVar("R")
 # Pilots queue like any other job, so a busy pool can take minutes to start the first one.
 N_WORKERS_WAIT_S = 600.0
 IDLE_LOG_S = 30.0  # between log lines of a service job still waiting for a slot
-_RUNNING = 2  # JobStatus
+_IDLE, _RUNNING = 1, 2  # JobStatus
+# a SERVICE node's periodic_remove takes a held node out of the queue, so only its history says why
+_GONE = ("LastHoldReason", "RemoveReason")
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,90 @@ _FLOOR = SubmitCapabilities(
 )
 
 
+class _Announcer(Protocol):
+    """What :meth:`HTCondorBackend._await_announce` reads of a job that announces: its announce ``key``, its
+    queue ``ad()`` (once it is gone, its history row, else ``{}``) and the ``dir`` its ``service.out``/``.err``
+    land in."""
+
+    key: str
+    dir: Path | None
+
+    def ad(self) -> Any: ...
+
+
+class _Unread(Exception):
+    """A DAG SERVICE node's queue ad could not be read: the bindings, the locate or a query failed."""
+
+
+class _Node:
+    """DAG SERVICE node ``key`` as :meth:`HTCondorBackend._await_announce` reads a service job: :meth:`ad` is
+    its queue ad within DAGMan job ``dag`` on ``schedd``, else, once it left the queue, its history row naming
+    why. Its first idle ad is matched once against the pool's slots less what the DAG's running jobs and
+    ``claims()`` hold, and no slot raises :class:`ServiceUnavailable` for service ``name``; DAGMan owns the
+    node, so nothing acts on it."""
+
+    def __init__(
+        self,
+        name: str,
+        key: str,
+        dir: Path | None,
+        schedd: Any,
+        dag: int,
+        locate: tuple[str, str],
+        claims: Callable[[], dict[str, list[Any]]],
+    ) -> None:
+        self.key = key
+        self.dir = dir
+        self._name = name
+        self._schedd = schedd
+        self._dag = dag
+        self._locate = locate
+        self._claims = claims
+        self._matched = False
+
+    def ad(self) -> Any:
+        node = f'DAGManJobId == {self._dag} && DAGNodeName == "{self.key}"'
+        refusal = None
+        try:
+            ads = list(self._schedd.query(constraint=node, projection=AD_ATTRS))
+            ad = ads[0] if ads else {}
+            if ad.get("JobStatus") == _IDLE and not self._matched:
+                self._matched = True
+                refusal = self._refusal(node)
+        except Exception as exc:
+            raise _Unread(exc) from exc
+        if refusal is not None:
+            raise ServiceUnavailable(self._name, {"managed": refusal})
+        return ad if ads else self._departed(node)
+
+    def _departed(self, node: str) -> dict[str, Any]:
+        """The departed node's ``JobStatus`` and ``ExitCode`` with its ``LastHoldReason``, else its
+        ``RemoveReason``, from its history row; ``{}``, logged, when that row is missing or unreadable."""
+        try:
+            # match=1: a larger match scans a big schedd's whole history
+            rows = list(self._schedd.history(node, projection=["JobStatus", "ExitCode", *_GONE], match=1))
+        except Exception as exc:
+            logger.warning("SERVICE node %s left the queue; its history is unreadable (%r)", self.key, exc)
+            return {}
+        if not rows:
+            logger.warning("SERVICE node %s left the queue with no history row", self.key)
+            return {}
+        row = rows[0]
+        why = "LastHoldReason" if row.get("LastHoldReason") else "RemoveReason"
+        return {name: row[name] for name in ("JobStatus", "ExitCode", why) if name in row}
+
+    def _refusal(self, node: str) -> str | None:
+        machines = machine_ads(self._locate)
+        whole = list(self._schedd.query(constraint=node)) if machines else []
+        # no slot listed says nothing of the pool; a node gone meanwhile is the wait's to report
+        if not whole:
+            return None
+        dag = f"the DAG's running jobs (DAGMan job {self._dag})"
+        running = f"DAGManJobId == {self._dag} && JobStatus == {_RUNNING}"
+        claims = {dag: list(self._schedd.query(constraint=running, projection=CLAIM_ATTRS)), **self._claims()}
+        return queued_refusal(f"SERVICE node {self.key}", whole[0], machines, claims)
+
+
 class HTCondorBackend:
     """Starts a task server and ``n_pilots`` pilots through ``launcher``; :meth:`close` removes them.
     Pilot jobs whose services are jobs too (``CondorPilots`` with ``host_service``) are submitted at
@@ -86,7 +174,9 @@ class HTCondorBackend:
     first free port of ``port_range`` on all interfaces, by default the ``driver_ports`` of the
     launcher's site profile (``generic`` for a launcher without one). ``in_job`` is the site row of the
     driver job this backend runs in (``driver.py`` passes it), else ``None`` (attached). ``announced`` maps
-    each service a SERVICE node of the driver job's DAG hosts to the node id it announces under.
+    each service a SERVICE node of the driver job's DAG hosts to the node id it announces under; the DAG's
+    directory is ``dag_dir``, and ``schedd_locate=(pool, name)`` names its schedd, where the wait for a
+    node's announce reads the node's queue ad.
     ``service_hosts`` narrows where a managed service may run to a subset of the hosts the row offers
     (``None``: all of them); a host it does not offer is refused before the task server starts.
     """
@@ -101,6 +191,8 @@ class HTCondorBackend:
         in_job: SiteProfile | None = None,
         announced: Mapping[str, str] | None = None,
         service_hosts: Sequence[str] | None = None,
+        schedd_locate: tuple[str, str] | None = None,
+        dag_dir: str | Path | None = None,
     ) -> None:
         self.capabilities = _FLOOR
         self.launcher = launcher
@@ -141,6 +233,8 @@ class HTCondorBackend:
         self._lock = threading.Lock()  # a service job is recorded before close() reads the record, or refused
         self._closing = threading.Event()  # set: a service job still waiting for a slot ends its wait
         self._announced = dict(announced or {})
+        self._schedd_locate = schedd_locate
+        self._dag_dir = None if dag_dir is None else Path(dag_dir)
         # the capability IS this pair of attributes: absent, the engine refuses naming it
         if self._announced:
             self.host_service = self._host_announced
@@ -315,16 +409,12 @@ class HTCondorBackend:
         The match counts each slot less what the running pilots (kept until the runner closes) and the
         set's earlier servers (keys of ``scope``, kept until the run ends) hold."""
         assert isinstance(self.launcher, CondorPilots)
-        machines = machine_ads(self.launcher)
+        machines = machine_ads(self.launcher.schedd_locate)
         claims: dict[str, list[Any]] = {}
         with self._pilots_lock:
-            if self._submitted_at is not None:
-                if not self._held:
-                    self.launcher.hold_queued()
-                    self._held = True
-                if machines and self.launcher.cluster is not None:
-                    pilots = f"the runner's running pilots (cluster {self.launcher.cluster[1]}, whose slots stay taken until it closes)"
-                    claims[pilots] = self.launcher.running_claims()
+            self._hold_queued()
+            if machines and self._submitted_at is not None:
+                claims.update(self._pilot_claims())
         if machines:
             with self._lock:
                 siblings = [job for key, job in self._services.items() if key.startswith(f"{scope}-")]
@@ -352,7 +442,23 @@ class HTCondorBackend:
         host, _, port = hostport.rpartition(":")
         return minted_endpoint(spec.check, host, int(port)), identity, key
 
-    def _await_announce(self, job: ServiceJob, spec: ServiceSpec) -> tuple[str, str]:
+    def _hold_queued(self) -> None:
+        """Hold the runner's queued pilot jobs, once submitted, so none takes the room a service waits for,
+        until the plan's services have started or failed (:meth:`starting_services` releases them); under
+        ``_pilots_lock``."""
+        if isinstance(self.launcher, CondorPilots) and self._submitted_at is not None and not self._held:
+            self.launcher.hold_queued()
+            self._held = True
+
+    def _pilot_claims(self) -> dict[str, list[Any]]:
+        """The running ads of the runner's pilot jobs, by holder (none before they are submitted)."""
+        launcher = self.launcher
+        if not isinstance(launcher, CondorPilots) or launcher.cluster is None:
+            return {}
+        pilots = f"the runner's running pilots (cluster {launcher.cluster[1]}, whose slots stay taken until it closes)"
+        return {pilots: launcher.running_claims()}
+
+    def _await_announce(self, job: _Announcer, spec: ServiceSpec) -> tuple[str, str]:
         """The job's announce. No deadline runs while it waits for a slot (idle, or held while its input
         spools), which is logged at the first such answer and every ``IDLE_LOG_S`` and ends when the
         backend closes; ``timeout_s`` counts from the first answer that it runs."""
@@ -368,7 +474,9 @@ class HTCondorBackend:
             if got is not None:
                 return got
             ad = job.ad()
-            state = ", ".join(f"{name}={ad[name]!r}" for name in AD_ATTRS if name in ad) or "no job ad"
+            state = (
+                ", ".join(f"{name}={ad[name]!r}" for name in (*AD_ATTRS, *_GONE) if name in ad) or "no job ad"
+            )
             now = time.monotonic()
             if deadline is None and ad.get("JobStatus") == _RUNNING:
                 deadline = now + spec.timeout_s
@@ -397,14 +505,34 @@ class HTCondorBackend:
         self._services.pop(key).stop()
 
     def _host_announced(self, spec: ServiceSpec, scope: str) -> tuple[str, str, str]:
-        """``spec``'s SERVICE node's announce: ``(endpoint, identity, node id)``."""
+        """``spec``'s SERVICE node's announce: ``(endpoint, identity, node id)``, with the runner's queued pilot
+        jobs held meanwhile. Where the DAG's schedd is at hand (``schedd_locate``, and ``$_CONDOR_JOB_AD``
+        naming the DAGMan job), the wait is :meth:`_await_announce`'s over the node's queue ad: a node that
+        left the queue or is held raises at once, an idle one no slot could ever run raises
+        :class:`ServiceUnavailable`, and ``timeout_s`` counts from its first running answer. Otherwise, and
+        from a failing import, locate or query on (logged once), the wait is ``timeout_s`` long."""
         node = self._announced.get(spec.name)
         if node is None:
             raise ValueError(
                 f"service {spec.name!r} has no SERVICE node in this run's DAG "
                 f"(announce_only={self._announced!r}), and a driver job submits no service job"
             )
-        got = self._server.wait_announce(node, spec.timeout_s)
+        with self._pilots_lock:
+            self._hold_queued()
+        got = None
+        try:
+            handle = self._node(spec.name, node)
+            if handle is not None:
+                got = self._await_announce(handle, spec)
+        except _Unread as exc:
+            logger.warning(
+                "SERVICE node %s (service %r): its queue ad is unreadable (%r); waiting for its announce alone",
+                node,
+                spec.name,
+                exc.__cause__,
+            )
+        if got is None:
+            got = self._server.wait_announce(node, spec.timeout_s)
         if got is None:
             raise TimeoutError(
                 f"SERVICE node {node} (service {spec.name!r}) did not announce within "
@@ -413,9 +541,22 @@ class HTCondorBackend:
         host, _, port = got[0].rpartition(":")
         return minted_endpoint(spec.check, host, int(port)), got[1], node
 
+    def _node(self, name: str, key: str) -> _Node | None:
+        """DAG SERVICE node ``key`` of service ``name`` on the DAG's schedd, or ``None`` when ``schedd_locate``
+        or the job ad's ``DAGManJobId`` is missing; :class:`_Unread` when the bindings or the locate fail."""
+        dag = machine_ad("DAGManJobId", env="_CONDOR_JOB_AD")
+        if self._schedd_locate is None or dag is None:
+            return None
+        where = None if self._dag_dir is None else self._dag_dir / f"service-{key}"
+        try:
+            schedd = located_schedd(_launch._htcondor(), self._schedd_locate)
+            return _Node(name, key, where, schedd, int(dag), self._schedd_locate, self._pilot_claims)
+        except Exception as exc:
+            raise _Unread(exc) from exc
+
     def _release_announced(self, key: str) -> None:
-        """Drop a pending announce of node ``key``; DAGMan removes the node when the DAG ends."""
-        self._server.wait_announce(key, 0.0)
+        """Nothing: a pending announce of node ``key`` is its restart's, which the next set resolves, and
+        DAGMan removes the node when the DAG ends."""
 
     def stop_waiting(self) -> None:
         """End every wait for a service job that has no slot yet, within one ``POLL_S``: the job is

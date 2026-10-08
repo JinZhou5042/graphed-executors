@@ -3,9 +3,10 @@
 One engine, N backends — the same factorization as the generic shuffle engine over
 ``ShuffleBackend``. The fixed path mirrors the local reduction topology EXACTLY: leaves are
 ``process`` tasks, combines follow the ``plan_tree`` shape as future dependencies, and the driver
-waits on the single root future (so bit-for-bit equality vs ``SequentialRunner`` is inherited, not
-re-derived). The adaptive path folds completions with ``running_fold`` and cancels outstanding work
-on stop. Both are reused from ``graphed_executors.local._reduce`` — no duplication.
+takes the value of the single root future (so bit-for-bit equality vs ``SequentialRunner`` is inherited,
+not re-derived), raising at the first task that fails. The adaptive path folds completions with
+``running_fold`` and cancels outstanding work on stop. Both are reused from
+``graphed_executors.local._reduce`` — no duplication.
 
 The worker seam (plan §1.1, review r1 B1): per-run state travels as a picklable :class:`RunContext`
 first argument; per-worker capability (``open_once`` resources + the event transport) arrives via a
@@ -67,7 +68,7 @@ from graphed_executors.local._reduce import plan_tree, running_fold
 from graphed_executors.local.executors import _PAUSED_WAKE_S, _wait_until, _Window
 
 from .protocol import SubmitBackend, SubmitFuture
-from .services import ServiceSet
+from .services import PROBE_CHECK_S, ServiceSet, ServiceUnreachable, check_ready, host_identity
 
 if TYPE_CHECKING:
     from graphed.core import Partition
@@ -284,16 +285,38 @@ def _event_from_dict(d: dict[str, object]) -> TaskEvent:
     )
 
 
+def _service_checked(
+    checks: tuple[tuple[str, str, str], ...], fn: Callable[..., object], *args: object
+) -> object:
+    """``fn(*args)``; when it raises, each ``(name, endpoint, check)`` is re-checked here, on the worker that
+    ran it, and the first that fails raises :class:`ServiceUnreachable` from the task's exception, which
+    is otherwise re-raised unchanged: a plan's own error beside a live service stays a plan error."""
+    try:
+        return fn(*args)
+    except Exception as exc:
+        for name, endpoint, check in checks:
+            why = check_ready(endpoint, check, PROBE_CHECK_S)
+            if why is not None:
+                raise ServiceUnreachable(
+                    name, endpoint, host_identity(), f"{why}; the task raised {exc!r}"
+                ) from exc
+        raise
+
+
 class _RunTasks:
     """One run's plan-task submits (the ``_RunLeaves`` idiom): only the futures not yet done are held,
-    since a held dask future pins its result in cluster memory, and :meth:`cancel` cancels those."""
+    since a held dask future pins its result in cluster memory, and :meth:`cancel` cancels those. With
+    ``checks`` (the run's services), every task runs through :func:`_service_checked`."""
 
-    def __init__(self, backend: SubmitBackend) -> None:
+    def __init__(self, backend: SubmitBackend, checks: tuple[tuple[str, str, str], ...] = ()) -> None:
         self._backend = backend
+        self._checks = checks
         self._lock = threading.Lock()
         self._pending: set[SubmitFuture] = set()
 
     def submit(self, fn: Callable[..., object], /, *args: object, key: str, retries: int) -> SubmitFuture:
+        if self._checks:
+            args, fn = (self._checks, fn, *args), _service_checked
         fut = self._backend.submit(fn, *args, key=key, retries=retries)
         with self._lock:
             self._pending.add(fut)
@@ -391,10 +414,13 @@ class SubmitRunner:
                 empty = None if isinstance(plan, DurablePlanV2) else plan.empty()
                 return ExecResult(empty, 0, 0, StopReason.CANCELLED)
             bound = plan
+            checks: tuple[tuple[str, str, str], ...] = ()
             if plan.services:
                 services = ServiceSet(plan.services, self.backend, endpoints=given, scope=ctx.run_nonce)
-                bound = graphed_services.bind_services(plan, scope.enter_context(services))
-            submits = _RunTasks(self.backend)
+                endpoints = scope.enter_context(services)
+                bound = graphed_services.bind_services(plan, endpoints)
+                checks = tuple((spec.name, endpoints[spec.name], spec.check) for spec in plan.services)
+            submits = _RunTasks(self.backend, checks)
             scope.callback(submits.cancel)  # registered after the services, so it runs before their release
             if ctx.monitor_topic is not None and ctx.events_per_leaf:
 
@@ -447,6 +473,7 @@ class SubmitRunner:
         phandle = backend.broadcast(ppayload, token=ptoken)
         key_to_task: dict[str, Task] = {}
         futs: dict[int, SubmitFuture] = {}
+        drained = 0  # a raise drains nothing: a piggyback backend ships a leaf's events only in its result()
         try:
             for i, task in enumerate(tasks):
                 if monitor is not None:
@@ -466,11 +493,20 @@ class SubmitRunner:
                 futs[out] = submits.submit(
                     _combine_task, ctx, chandle, ctoken, futs[a], futs[b], key=key, retries=self._retries
                 )
+            # a combine settles only once all its inputs have, so the root alone learns of a failure late
+            done_q: queue.Queue[SubmitFuture] = queue.Queue()
+            for fut in futs.values():
+                fut.add_done_callback(done_q.put)
+            while not futs[root].done():
+                fut = done_q.get()
+                if fut.exception() is not None:  # exception() transfers no result on dask
+                    self._result(fut, key_to_task)  # raises it, translated
             value = cast(R, self._result(futs[root], key_to_task))
+            drained = n
             return ExecResult(value, n, len(combines), StopReason.EXHAUSTED)
         finally:
             if ctx.monitor_topic is not None:  # drain trailing worker events before unsubscribe
-                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * n, _DRAIN_TIMEOUT_S)
+                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * drained, _DRAIN_TIMEOUT_S)
 
     def _run_fixed_windowed(
         self,
@@ -510,6 +546,7 @@ class SubmitRunner:
         ready: dict[int, SubmitFuture] = {}  # completed node -> its future, until a combine takes it
         key_to_task: dict[str, Task] = {}
         sent = done = n_combines = 0  # leaves submitted, leaves completed, combines submitted
+        drained = 0  # a raise drains nothing: a piggyback backend ships a leaf's events only in its result()
 
         def start(item: tuple[int, Task]) -> None:
             nonlocal sent
@@ -556,10 +593,11 @@ class SubmitRunner:
             )
             value, k = running_fold(iter(cast("list[tuple[int, R]]", pieces)), plan.combine, plan.empty)
             stopped = StopReason.CANCELLED if window.stopped else StopReason.EXHAUSTED
+            drained = sent
             return ExecResult(value, done, n_combines + k, stopped)
         finally:
-            if ctx.monitor_topic is not None:  # drain trailing worker events of every submitted leaf
-                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * sent, _DRAIN_TIMEOUT_S)
+            if ctx.monitor_topic is not None:  # drain trailing worker events before unsubscribe
+                _wait_until(lambda: events_seen[0] >= ctx.events_per_leaf * drained, _DRAIN_TIMEOUT_S)
 
     # ---- adaptive path + stop (plan §1.2.4) ----
 

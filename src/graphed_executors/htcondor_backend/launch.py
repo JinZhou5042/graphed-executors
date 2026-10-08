@@ -44,6 +44,12 @@ PLAN_FILE, RUN_FILE, RESULT_FILE, LOG_FILE = "plan.pkl", "run.json", "result.pkl
 PILOT_MODULE = "graphed_executors.htcondor_backend.pilot"
 HOLD_REASON = "graphed: a service of this run waits for a slot"
 SLOT_RESOURCES = ("Memory", "Cpus", "GPUs", "Disk")  # a running job holds <r>Provisioned, else Request<r>
+# a running job's slot and what it was given there
+CLAIM_ATTRS = [
+    "RemoteHost",
+    *(f"{r}Provisioned" for r in SLOT_RESOURCES),
+    *(f"Request{r}" for r in SLOT_RESOURCES),
+]
 
 
 class CondorReason(tuple[str, None]):
@@ -70,6 +76,12 @@ def _htcondor() -> Any:
 
 
 STORE_CREDENTIAL = "$(condor_config_val SEC_CREDENTIAL_PRODUCER) | condor_store_cred add-krb -i -"
+
+
+def located_schedd(htc: Any, locate: tuple[str, str]) -> Any:
+    """The schedd ``locate = (pool, name)`` names, found through that pool's collector."""
+    pool, name = locate
+    return htc.Schedd(htc.Collector(pool).locate(htc.DaemonType.Schedd, name))
 
 
 def ensure_credential(htc: Any, desc: Mapping[str, str]) -> None:
@@ -328,8 +340,7 @@ class CondorPilots:
         """The site's schedd: lowest :func:`schedd_weight` among the query's ads, asking each collector
         in the param's list in turn, else the user's own schedd; ``schedd_locate`` overrides both."""
         if self.schedd_locate is not None:
-            pool, name = self.schedd_locate
-            return name, htc.Schedd(htc.Collector(pool).locate(htc.DaemonType.Schedd, name))
+            return self.schedd_locate[1], located_schedd(htc, self.schedd_locate)
         if self.profile.schedd_query is None:
             # the name a later session locates this schedd by: its own ad's, not this host's
             name = htc.param.get("SCHEDD_HOST") or htc.Collector().locate(htc.DaemonType.Schedd)["Name"]
@@ -372,8 +383,7 @@ class CondorPilots:
         """The running ads of ``jobs`` (a constraint; the pilots by default): the slot each runs in and
         what it was given there."""
         constraint = f"{jobs or self._constraint} && JobStatus == 2"
-        sizes = [f"{r}Provisioned" for r in SLOT_RESOURCES] + [f"Request{r}" for r in SLOT_RESOURCES]
-        return list(self._schedd.query(constraint=constraint, projection=["RemoteHost", *sizes]))
+        return list(self._schedd.query(constraint=constraint, projection=CLAIM_ATTRS))
 
     def _drain(self) -> None:
         deadline = time.monotonic() + CLOSE_WAIT_S

@@ -17,9 +17,11 @@ while a plan's services start, and the resolving and the probe inside its ``star
 context, a backend that starts one set at a time.
 
 Readiness is :func:`check_ready`, one function every caller runs: where the service runs, then from a
-worker. The worker probe is an ordinary ``backend.submit`` of :func:`_probe_services`, one task that
-runs every service's check and answers with :func:`host_identity` and each check's reason; each answer
-is awaited up to the largest ``timeout_s`` among the set's services. It is resubmitted under a fresh
+worker. Where the service runs, a dial passes on any listener, so a port another process listens on
+(:func:`listeners`, read from Linux ``/proc``) that the child's process tree does not hold
+(:func:`held_by`) refuses the start. The worker probe is an ordinary ``backend.submit`` of
+:func:`_probe_services`, one task that runs every service's check and answers with :func:`host_identity`
+and each check's reason; each answer is awaited up to the largest ``timeout_s`` among the set's services. It is resubmitted under a fresh
 key (at most ``max(2, n_workers())`` times) until a host other than a managed service's own answers,
 and a service only its own host can reach passes only
 when that host is the driver's (one machine). Every acquisition registers its release on an
@@ -153,10 +155,10 @@ class Endpoints(Mapping[str, str]):
 # ---- host identity and readiness -----------------------------------------------------------------
 
 
-def machine_ad(attr: str) -> str | None:
-    """``attr`` of the ad file ``$_CONDOR_MACHINE_AD`` names (string quotes dropped), read without the
-    bindings; ``None`` outside a job or when the ad has no such line."""
-    path = os.environ.get("_CONDOR_MACHINE_AD")
+def machine_ad(attr: str, env: str = "_CONDOR_MACHINE_AD") -> str | None:
+    """``attr`` of the ad file ``$<env>`` names (string quotes dropped; ``_CONDOR_JOB_AD`` for the job's own
+    ad), read without the bindings; ``None`` outside a job or when the ad has no such line."""
+    path = os.environ.get(env)
     if path and os.path.isfile(path):
         with open(path) as ad:
             for line in ad:
@@ -170,6 +172,48 @@ def host_identity() -> str:
     """This host as the pool names it: ``Machine`` from ``$_CONDOR_MACHINE_AD`` (a container's own
     hostname is not the execute node's), else ``socket.getfqdn()``."""
     return machine_ad("Machine") or socket.getfqdn()
+
+
+def listeners(port: int, proc: str = "/proc") -> set[str]:
+    """The inodes of the sockets listening on ``port``, read from ``{proc}/net/tcp`` and ``{proc}/net/tcp6``;
+    a file that cannot be read contributes none, so a host without ``/proc`` has no listener here."""
+    found: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc, "net", name)) as f:
+                rows = f.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            col = row.split()
+            if col[3] == "0A" and int(col[1].rsplit(":", 1)[1], 16) == port:  # 0A: TCP_LISTEN
+                found.add(col[9])
+    return found
+
+
+def held_by(pid: int, inodes: set[str], proc: str = "/proc") -> bool:
+    """Whether ``pid`` and its descendants (each ``{proc}/<pid>/stat`` names its parent) hold every one of
+    ``inodes`` among their fds; a process whose ``stat`` or ``fd`` cannot be read holds none."""
+    kids: dict[int, list[int]] = {}
+    for entry in os.listdir(proc):
+        if entry.isdigit():
+            try:
+                with open(os.path.join(proc, entry, "stat")) as f:
+                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])  # comm, in parentheses, may hold spaces
+            except (OSError, IndexError, ValueError):
+                continue
+            kids.setdefault(ppid, []).append(int(entry))
+    links: set[str] = set()
+    todo = [pid]
+    while todo:
+        p = todo.pop()
+        todo.extend(kids.get(p, ()))
+        fds = os.path.join(proc, str(p), "fd")
+        with contextlib.suppress(OSError):
+            for fd in os.listdir(fds):
+                with contextlib.suppress(OSError):  # an fd closed meanwhile, or a host without symlinks
+                    links.add(os.readlink(os.path.join(fds, fd)))
+    return {f"socket:[{inode}]" for inode in inodes} <= links
 
 
 def physical_memory_mb() -> int:
@@ -531,6 +575,11 @@ class ServiceSet:
                     raise ServiceUnavailable(spec.name, {**legs, "managed": reason})
                 left = deadline - time.monotonic()
                 reason_now = check_ready(endpoint, spec.check, max(0.1, min(left, _READY_CHECK_S)))
+                # read after the dial, which passes on any listener, so the one it reached is judged
+                inodes = listeners(port)
+                if inodes and not held_by(proc.pid, inodes):
+                    reason = f"port {port} on {host} is held by another process"
+                    raise ServiceUnavailable(spec.name, {**legs, "managed": reason})
                 if reason_now is None:
                     code = proc.poll()
                     if code is None:
@@ -630,7 +679,9 @@ __all__ = [
     "ServiceUnavailable",
     "ServiceUnreachable",
     "check_ready",
+    "held_by",
     "host_identity",
+    "listeners",
     "machine_ad",
     "minted_endpoint",
     "physical_memory_mb",

@@ -9,15 +9,19 @@ It reads the secret, starts the recipe's child in ``service/`` (the transferred 
 the recipe's inputs) on the first free port of ``ports``, checks it where it runs, and posts ``key
 host:port identity``, signed, to ``<url>/announce``. ``timeout_s`` bounds the whole start. A child that
 exits moves on to the next port only when another process took its port; otherwise the start fails (exit
-3). Attached (``url`` set): the secret file is read and unlinked before the child starts, the announce
-repeats every ``beat_s``, and a 403 or no 200 for ``lease_s`` (counted from readiness) stops the service
-and exits 0, as an orphaned pilot does. Watch mode (``watch`` a directory): ``<watch>/driver.url`` and
-``<watch>/graphed-secret`` are read each second and each new pair is announced until it answers 200.
-Otherwise the exit code is the child's; SIGTERM reaps the child and exits 143.
+3). A port another process listens on, which the child's process tree does not hold (Linux ``/proc``),
+moves on too. Attached (``url`` set): the secret file is read and unlinked before the child starts, the
+announce repeats every ``beat_s``, and a 403 or no 200 for ``lease_s`` (counted from readiness) stops the
+service and exits 0, as an orphaned pilot does. Watch mode (``watch`` a directory): ``<watch>/driver.url`` and
+``<watch>/graphed-secret`` are read each second and each new pair is announced until it answers 200, and a
+child that dies after it was ready is started again, at most ``RESTARTS`` times, on a port no earlier
+child of this job served, then announced to the current pair. Otherwise the exit code is the child's
+(3 when a restart never became ready); SIGTERM reaps the child and exits 143.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -38,6 +42,7 @@ SECRET_FILE = "graphed-secret"
 URL_FILE = "driver.url"
 REAP_S = 5.0
 CHECK_S = 5.0
+RESTARTS = 3  # starts of a watch-mode child after its first one dies
 
 # the self-check dials this job's own port: an environment proxy must not sit in between
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -80,6 +85,48 @@ def self_check(check: str, host: str, port: int, timeout: float) -> str | None:
         return None
     except Exception as exc:  # a refusal, a non-2xx (HTTPError), a server not yet speaking HTTP
         return repr(exc)
+
+
+def listeners(port: int, proc: str = "/proc") -> set[str]:
+    """The inodes of the sockets listening on ``port`` (the engine's rule, copied): read from
+    ``{proc}/net/tcp`` and ``{proc}/net/tcp6``; a file that cannot be read contributes none."""
+    found: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc, "net", name)) as f:
+                rows = f.read().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            col = row.split()
+            if col[3] == "0A" and int(col[1].rsplit(":", 1)[1], 16) == port:  # 0A: TCP_LISTEN
+                found.add(col[9])
+    return found
+
+
+def held_by(pid: int, inodes: set[str], proc: str = "/proc") -> bool:
+    """Whether ``pid`` and its descendants hold every one of ``inodes`` among their fds (the engine's rule,
+    copied); a process whose ``stat`` or ``fd`` cannot be read holds none."""
+    kids: dict[int, list[int]] = {}
+    for entry in os.listdir(proc):
+        if entry.isdigit():
+            try:
+                with open(os.path.join(proc, entry, "stat")) as f:
+                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])  # comm, in parentheses, may hold spaces
+            except (OSError, IndexError, ValueError):
+                continue
+            kids.setdefault(ppid, []).append(int(entry))
+    links: set[str] = set()
+    todo = [pid]
+    while todo:
+        p = todo.pop()
+        todo.extend(kids.get(p, ()))
+        fds = os.path.join(proc, str(p), "fd")
+        with contextlib.suppress(OSError):
+            for fd in os.listdir(fds):
+                with contextlib.suppress(OSError):  # an fd closed meanwhile, or a host without symlinks
+                    links.add(os.readlink(os.path.join(fds, fd)))
+    return {f"socket:[{inode}]" for inode in inodes} <= links
 
 
 def free(port: int) -> bool:
@@ -157,12 +204,17 @@ def interpreter(name: str) -> str:
     return shutil.which(name, path=os.environ.get("PATH", os.defpath)) or name
 
 
-def start(cfg: dict[str, Any], ident: str) -> tuple[subprocess.Popen[bytes], int] | str:
-    """The ready child and its port, or why none is."""
+def start(
+    cfg: dict[str, Any], ident: str, skip: frozenset[int] = frozenset()
+) -> tuple[subprocess.Popen[bytes], int] | str:
+    """The ready child and its port, never one of ``skip``, or why none is."""
     low, high = cfg["ports"]
     deadline = time.monotonic() + float(cfg["timeout_s"])
     subs = {"{python}": interpreter(cfg["python"]), "{host}": ident}
     for port in range(low, high + 1):
+        if port in skip:
+            log(f"port {port} served an earlier child, next")
+            continue
         if not free(port):
             log(f"port {port} taken, next")
             continue
@@ -190,6 +242,12 @@ def start(cfg: dict[str, Any], ident: str) -> tuple[subprocess.Popen[bytes], int
                 log(f"port {port} taken after the scan (the child exited {child.returncode}), next")
                 break
             why = self_check(cfg["check"], ident, port, max(0.1, min(CHECK_S, deadline - time.monotonic())))
+            # read after the dial, which passes on any listener, so the one it reached is judged
+            inodes = listeners(port)
+            if inodes and not held_by(child.pid, inodes):
+                log(f"port {port} is held by another process, next")
+                reap(child)
+                break
             if why is None and child.poll() is None:
                 return child, port
             if time.monotonic() >= deadline:
@@ -233,7 +291,23 @@ def serve() -> int:
     log(f"ready pid={child.pid} body={body.decode()!r}")
     last: tuple[str, bytes] | None = None
     last_ok, announced = time.monotonic(), False
-    while child.poll() is None:
+    # graphed keys a worker's client by endpoint and pilots outlive a rerun: no port serves two children
+    served, restarts = {port}, 0
+    while True:
+        if child.poll() is not None:
+            log(f"the child exited {child.returncode}")
+            if not cfg["watch"] or restarts >= RESTARTS:
+                return int(child.returncode)
+            restarts += 1
+            started = start(cfg, ident, frozenset(served))
+            if isinstance(started, str):
+                log(f"not ready: {started}")
+                return 3
+            child, port = started
+            served.add(port)
+            body = f"{cfg['key']} {ident}:{port} {ident}".encode()
+            log(f"restart {restarts} of {RESTARTS}: ready pid={child.pid} body={body.decode()!r}")
+            last = None  # announced again to the pair already answered
         if cfg["watch"]:
             pair = _watched(cfg["watch"])
             if pair is not None and pair != last:
@@ -253,8 +327,6 @@ def serve() -> int:
             reap(child)
             return 0
         time.sleep(cfg["beat_s"] if announced else 1.0)
-    log(f"the child exited {child.returncode}")
-    return int(child.returncode)
 
 
 def main() -> int:

@@ -386,9 +386,13 @@ above:
 Watching a run
 --------------
 
-Pass any object with the ``graphed.core.execution.Monitor`` shape to ``dask_runner`` and you get
-one event per task as it is submitted, starts, finishes or errors, delivered over dask's
-structured-event channel on a topic private to that run:
+Pass any object with the ``graphed.core.execution.Monitor`` shape to ``dask_runner`` and it is told
+each time a ``process`` task is submitted, starts, finishes or errors, over dask's structured-event
+channel on a topic private to that run. Merges emit no task events, a lean monitor gets no "started"
+event, and a ``DurablePlanV2`` run's stage tasks emit none. A run of a plan without ``next_tasks``,
+with or without a ``RunControl``, that returns first waits for the trailing events of the tasks it
+submitted, and one that raises stops listening at once, so the events of tasks that finished just
+before the raise may not arrive:
 
 .. code-block:: python
 
