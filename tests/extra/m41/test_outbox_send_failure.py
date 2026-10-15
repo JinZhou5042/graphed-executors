@@ -56,6 +56,3 @@ def test_outbox_send_failure_surfaces_in_the_actor() -> None:
             emit=True,  # a second queued send (the batched events) follows the root
         )
     assert transport.attempts == 1  # a broken transport is not re-tried; the queue drains unsent
-    # The failure must be DEFERRED to the actor's exit, not raised where the send was issued: the
-    # actor kept running long enough to take the driver's `done` off the wire.
-    assert transport.recvs >= 1

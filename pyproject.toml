@@ -137,7 +137,7 @@ exclude = ['^tests/frozen/m69a/data/inclusive_processor\.py$']
 # sibling helper modules are bases as well, so `import _big_partial` resolves the way pytest's
 # prepend import mode resolves it; the frozen dirs must NOT be, since a base there would put their
 # files back on bare basenames and un-match the override.
-mypy_path = ["src", ".", "tests/extra/m41", "tests/extra/m54", "tests/extra/m68d", "examples/hgg"]
+mypy_path = ["src", ".", "tests/extra/hdna", "tests/extra/m41", "tests/extra/m54", "tests/extra/m68d", "examples/hgg"]
 explicit_package_bases = true
 
 # Read-only helpers under tests/frozen/{m44,m47,m63,m65,m68c,m68d,m74} that tests import by bare basename: pytest

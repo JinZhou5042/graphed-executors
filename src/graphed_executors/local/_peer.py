@@ -638,6 +638,8 @@ def process_and_reduce(
 
     try:
         while not done:
+            if outbox._error is not None:  # a failed send (an unpicklable partial) never reaches the root
+                raise outbox._error
             while pending and not done:
                 handle(pending.pop(0))
             for _sender, payload in transport.poll():  # cheap non-blocking drain between leaves

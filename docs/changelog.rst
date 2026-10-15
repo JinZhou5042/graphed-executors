@@ -106,6 +106,9 @@ An H→γγ analysis on graphed
 Fixed
 ~~~~~
 
+* Under peer reduction (``ProcessPoolExecutor`` with ``comms`` set), a worker whose partial fails to
+  send, such as one that does not pickle, raises that error at once; the run waited out the 300 s
+  root timeout and raised ``TimeoutError``.
 * **A process-pool worker that starts slowly no longer fails the run.** Before the first task, the
   process pool sends the plan's function to every worker; it gave up after 1000 quick rounds (about
   3 s) while a worker was still starting, raising ``broadcast reached only 1/2 workers``. It now
