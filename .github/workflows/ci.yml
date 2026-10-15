@@ -14,9 +14,8 @@ concurrency:
 env:
   # the former core/debug/frontend/numpy/awkward siblings are now one consolidated package
   # Pinned, not @main: graphed is an unpinned upstream whose merges can redden this frozen suite with
-  # no local change. At graphed#69's merge commit on main (graphed.checkpoint.resumable, which m74 runs
-  # on). A git install builds the Rust core, so every job installing it needs a Rust toolchain.
-  GRAPHED: "graphed[awkward,numpy] @ git+https://github.com/graphed-org/graphed@ac1af0c89d113aae9244aa0f5db0e5f96c801749"
+  # no local change. graphed 0.0.7 from PyPI.
+  GRAPHED: "graphed[awkward,numpy]==0.0.7"
   # corpus stays a separate package (test fixtures only, not shipped in the graphed wheel)
   CORPUS: "graphed-corpus @ git+https://github.com/graphed-org/graphed-corpus-mvp@main"
   # The frozen tree fills real histograms across the process boundary. Unlike CORPUS, omitting this

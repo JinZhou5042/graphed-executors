@@ -1,8 +1,10 @@
 What changed
 ============
 
-Unreleased
-----------
+0.0.5
+-----
+
+Requires ``graphed`` 0.0.7 or later.
 
 Run on an HTCondor pool
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -86,9 +88,6 @@ Services a plan calls
   come before the join. The local executors and the peer reductions refuse one with a ``TypeError``
   naming ``SubmitRunner``. Its stage functions travel by value, so on HTCondor too (``htcondor_runner``,
   ``submit_driverless``) they may be lambdas or live in ``__main__``. See :ref:`design-join-plan`.
-* This needs ``graphed.services``, which no graphed release has yet (0.0.6 does not): CI installs
-  graphed from git, and graphed-executors will not be released until its ``graphed`` floor moves to
-  the release carrying the service surface and its resolve walk.
 
 An H→γγ analysis on graphed
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -96,9 +95,8 @@ An H→γγ analysis on graphed
 * ``examples/hgg``: a HiggsDNA-derived H→γγ inclusive processor translated to graphed, on coffea
   NanoEvents in graphed mode. One plan over a fileset of MC and data writes the original's parquet
   part for every chunk and returns each dataset's counters as coffea's Runner accumulates them,
-  and a new CI job checks it against the original script (:doc:`hgg`). It needs graphed's
-  multi-output plans (``aggregate_plan(writes=)``, ``collate``, ``parquet_write``), which CI
-  installs from git until a graphed release carries them.
+  and a new CI job checks it against the original script (:doc:`hgg`). It uses graphed 0.0.7's
+  multi-output plans (``aggregate_plan(writes=)``, ``collate``, ``parquet_write``).
 * Its value holds seven diphoton diagnostics per dataset (``analysis.DIAGNOSTICS``), filled locally or,
   with ``plan(..., context=)``, on histserv servers; ``run_local.py`` saves them as UHI JSON, and
   ``run_lpc.py`` runs the analysis at the LPC from the HiggsDNA sample manifests (:doc:`hgg`).

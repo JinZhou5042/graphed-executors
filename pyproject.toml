@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graphed-executors"
-version = "0.0.4"
+version = "0.0.5"
 description = "Run a graphed plan on threads, processes, a dask cluster, or a parsl pool"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 # graphed carries the execution contract (Plan/Task/Partition), Session, and StageError.
-dependencies = ["graphed>=0.0.6", "cloudpickle"]
+dependencies = ["graphed>=0.0.7", "cloudpickle"]
 
 [project.optional-dependencies]
 # the backends + corpus are only needed to exercise realistic HEP analyses end-to-end in the suite
