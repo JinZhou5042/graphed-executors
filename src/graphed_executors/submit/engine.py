@@ -870,9 +870,11 @@ class SubmitRunner:
             frames=(frame,),
             input_forms=(),
             partition=partition,
-            cause_type="KilledWorker",
+            cause_type=type(exc).__name__ if isinstance(exc, TimeoutError) else "KilledWorker",
             cause_message=(
-                f"worker {last_worker} died (segfault/OOM/preemption suspected; note: blame can be "
+                str(exc)
+                if isinstance(exc, TimeoutError)
+                else f"worker {last_worker} died (segfault/OOM/preemption suspected; note: blame can be "
                 f"unfair under co-located tasks)"
             ),
             opt_level=0,

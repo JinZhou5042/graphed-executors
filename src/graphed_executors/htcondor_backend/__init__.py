@@ -11,7 +11,7 @@ from __future__ import annotations
 from .backend import HTCondorBackend, HTCondorRunner, htcondor_runner
 from .driverless import RunHandle, submit_driverless
 from .launch import CondorPilots, LocalPilots, PilotLauncher
-from .server import WorkerLost
+from .server import TaskTimedOut, WorkerLost
 from .sites import SITES, SiteProfile
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "PilotLauncher",
     "RunHandle",
     "SiteProfile",
+    "TaskTimedOut",
     "WorkerLost",
     "htcondor_runner",
     "submit_driverless",

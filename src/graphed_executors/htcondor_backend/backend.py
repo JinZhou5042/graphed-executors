@@ -54,7 +54,7 @@ from graphed_executors.submit.services import (
 from . import launch as _launch
 from . import server as _server
 from .launch import CLAIM_ATTRS, CondorPilots, PilotLauncher, located_schedd
-from .server import TaskServer, WorkerLost
+from .server import TaskServer, TaskTimedOut, WorkerLost
 from .services import AD_ATTRS, ServiceJob, machine_ads, queued_refusal
 from .sites import SITES, SiteProfile, counts_as_alive
 
@@ -179,6 +179,8 @@ class HTCondorBackend:
     node's announce reads the node's queue ad.
     ``service_hosts`` narrows where a managed service may run to a subset of the hosts the row offers
     (``None``: all of them); a host it does not offer is refused before the task server starts.
+    ``task_timeout_s`` bounds how long one task may run on a pilot (``None``, the default: no limit);
+    past it the task fails with :class:`TaskTimedOut` and the pilot stops, freeing its slot.
     """
 
     def __init__(
@@ -193,6 +195,7 @@ class HTCondorBackend:
         service_hosts: Sequence[str] | None = None,
         schedd_locate: tuple[str, str] | None = None,
         dag_dir: str | Path | None = None,
+        task_timeout_s: float | None = None,
     ) -> None:
         self.capabilities = _FLOOR
         self.launcher = launcher
@@ -224,7 +227,7 @@ class HTCondorBackend:
             self.driver_memory_mb = None if slot is None else int(slot)
         low, high = port_range if port_range is not None else profile.driver_ports
         try:
-            self._server = TaskServer(self.advertise_host, (low, high), launcher)
+            self._server = TaskServer(self.advertise_host, (low, high), launcher, task_timeout_s)
         except OSError as exc:
             raise OSError(
                 f"no free port for the task server: site={profile.name} ports={low}-{high}"
@@ -390,7 +393,7 @@ class HTCondorBackend:
             fut.cancel()
 
     def describe_failure(self, exc: BaseException) -> tuple[str, str] | None:
-        return (exc.key, exc.pilot) if isinstance(exc, WorkerLost) else None
+        return (exc.key, exc.pilot) if isinstance(exc, WorkerLost | TaskTimedOut) else None
 
     def host_identity(self) -> str:
         """The driver's host as condor writes ``Machine`` for its slots: ``FULL_HOSTNAME`` attached (the
@@ -673,12 +676,14 @@ def htcondor_runner(
     max_in_flight: int = 2,
     services: Mapping[str, str] | None = None,
     service_hosts: Sequence[str] | None = None,
+    task_timeout_s: float | None = None,
 ) -> HTCondorRunner:
     """``n_pilots`` pilot jobs on the ``site`` pool behind an :class:`HTCondorRunner`;
     ``runner.close()`` removes them. ``port_range`` is the driver-side port range; default from the
     site profile. ``services`` are the runner's given service endpoints. ``service_hosts`` narrows
     where a managed service runs to a subset of the site's, such as ``("cluster",)``; a host the site
-    does not offer is refused before any pilot is submitted."""
+    does not offer is refused before any pilot is submitted. ``task_timeout_s`` is
+    :class:`HTCondorBackend`'s."""
     pilots = CondorPilots(
         site,
         image=image,
@@ -689,7 +694,14 @@ def htcondor_runner(
         env=env,
         extra_submit=extra_submit,
     )
-    backend = HTCondorBackend(pilots, n_pilots, host=host, port_range=port_range, service_hosts=service_hosts)
+    backend = HTCondorBackend(
+        pilots,
+        n_pilots,
+        host=host,
+        port_range=port_range,
+        service_hosts=service_hosts,
+        task_timeout_s=task_timeout_s,
+    )
     return HTCondorRunner(
         backend,
         min_pilots=min_pilots,

@@ -338,9 +338,10 @@ attributed ``StageError`` naming the partition and the last worker that held it,
 handing you the raw scheduler error. The attribution can be unfair when several tasks shared the
 dead worker, and the message says so.
 
-Retries are the underlying library's, not a second layer on top: ``dask_runner``'s ``retries``
-forwards to dask's per-task retries, which resubmit on another worker. There is no graphed-level
-retry loop to double up with it. The default is 3, so a deterministic exception in your
+Retries are the underlying library's where it has them: ``dask_runner``'s ``retries`` forwards to
+dask's per-task retries, which resubmit on another worker, with no graphed-level loop on top.
+parsl keeps its retries in the DataFlowKernel, which ``parsl_runner`` does not use, so there the
+driver resubmits a failed task itself. The default is 3, so a deterministic exception in your
 ``process`` is executed four times before the driver sees it; ``retries=0`` while debugging.
 
 .. _design-epoch-restart:

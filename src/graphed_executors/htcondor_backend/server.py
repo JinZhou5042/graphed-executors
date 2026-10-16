@@ -11,7 +11,8 @@ only and signs no pickle, so a service job never holds the secret that runs code
 
 A task waits in PENDING until its future arguments are done, then queues. Its first lease moves it to
 RUNNING. A pilot silent for ``LEASE_S`` is lost: each task it held is re-queued once, and a second loss
-fails it with :class:`WorkerLost`. When no pilot is left and none can come, queued tasks fail too.
+fails it with :class:`WorkerLost`. A task leased longer than ``task_timeout_s`` fails with
+:class:`TaskTimedOut` and its pilot is lost. When no pilot is left and none can come, queued tasks fail too.
 """
 
 from __future__ import annotations
@@ -71,12 +72,26 @@ def settle(fut: Future[Any], value: object = None, exc: BaseException | None = N
             fut.set_result(value)
 
 
+class TaskTimedOut(TimeoutError):
+    """Task ``key`` ran on ``pilot`` longer than ``seconds``, the backend's ``task_timeout_s``."""
+
+    def __init__(self, key: str, pilot: str, seconds: float) -> None:
+        super().__init__(key, pilot, seconds)
+        self.key = key
+        self.pilot = pilot
+        self.seconds = seconds
+
+    def __str__(self) -> str:
+        return f"task {self.key} ran on pilot {self.pilot} longer than task_timeout_s={self.seconds}"
+
+
 @dataclass
 class _Task:
     key: str
     fut: Future[Any]
     payload: bytes
     leased_to: str | None = None
+    leased_at: float = 0.0
     started: bool = False
     requeued: bool = False
 
@@ -100,9 +115,12 @@ def _bind(port_range: tuple[int, int]) -> _Http:
 class TaskServer:
     """Binds the first free port of ``port_range`` (inclusive) on all interfaces and advertises
     ``http://{host}:{port}``. ``launcher`` is asked how many pilots can still come, and its
-    ``log_dir`` (if any) is named when none can."""
+    ``log_dir`` (if any) is named when none can. ``task_timeout_s`` (``None``: no limit) bounds a lease."""
 
-    def __init__(self, host: str, port_range: tuple[int, int], launcher: Any) -> None:
+    def __init__(
+        self, host: str, port_range: tuple[int, int], launcher: Any, task_timeout_s: float | None = None
+    ) -> None:
+        self._task_timeout_s = task_timeout_s
         self.secret = secrets.token_bytes(32)
         self._launcher = launcher
         self._cond = threading.Condition()
@@ -247,7 +265,7 @@ class TaskServer:
                         if not task.fut.set_running_or_notify_cancel():
                             del self._tasks[tid]  # cancelled while it queued
                             continue
-                    task.leased_to = pilot
+                    task.leased_to, task.leased_at = pilot, time.monotonic()
                     return tid, task.payload
                 if not self._cond.wait(deadline - time.monotonic()):
                     return None
@@ -280,7 +298,13 @@ class TaskServer:
     def reap_once(self) -> None:
         failed: list[tuple[Future[Any], BaseException]] = []
         now = time.monotonic()
+        limit = self._task_timeout_s
         with self._cond:
+            for tid, task in list(self._tasks.items()):
+                if limit is not None and task.leased_to is not None and now - task.leased_at > limit:
+                    del self._tasks[tid]  # its pilot's late result is dropped
+                    self._lost.add(task.leased_to)  # a pilot runs one task: it stops at its next beat
+                    failed.append((task.fut, TaskTimedOut(task.key, task.leased_to, limit)))
             for pilot, beat in self._beats.items():
                 if pilot in self._lost or now - beat <= LEASE_S:
                     continue

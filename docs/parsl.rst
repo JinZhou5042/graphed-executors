@@ -132,6 +132,11 @@ you leak processes and ports.
 
 An exception raised inside your ``process`` comes back whole — see `When things fail`_.
 
+``parsl_runner(executor, retries=3)`` resubmits a failed task from the driver, up to ``retries``
+times: parsl keeps its own retries in the DataFlowKernel, which this backend does not use. **It
+defaults to 3**, so a deterministic exception in your ``process`` runs four times before it reaches
+you, as on dask; pass ``retries=0`` while debugging.
+
 
 Repartitioning and joining
 --------------------------

@@ -240,6 +240,7 @@ def submit_driverless(
     storage_options: Mapping[str, Any] | None = None,
     salt: str = "",
     accept_environment: bool = False,
+    task_timeout_s: float | None = None,
 ) -> RunHandle:
     """Submit ``plan`` as ONE job on ``site`` whose driver runs it over ``n_pilots`` pilots:
     ``pilots="local"`` starts them in the job's own slot (``request_cpus=n_pilots``), ``pilots="condor"``
@@ -253,8 +254,8 @@ def submit_driverless(
     With ``store`` (a directory every pilot mounts, made absolute here, or an fsspec URL with
     ``storage_options``), the driver runs ``graphed.checkpoint.resumable(plan, store,
     storage_options=..., salt=..., accept_environment=...)`` on every try, so a retried driver
-    recomputes only the tasks the store does not hold. Everything is refused before the bindings are
-    touched."""
+    recomputes only the tasks the store does not hold. ``task_timeout_s`` is
+    :class:`HTCondorBackend`'s. Everything is refused before the bindings are touched."""
     options = dict(storage_options or {}) if store is not None else {}  # unused without a store
     if store is not None:
         # the driver's cwd is the job sandbox HTCondor deletes, so a local store must be absolute here
@@ -370,6 +371,7 @@ def submit_driverless(
         "storage_options": options,
         "salt": salt,
         "accept_environment": accept_environment,
+        "task_timeout_s": task_timeout_s,
     }
     (run_dir / RUN_FILE).write_text(json.dumps(run, indent=1))
     if not nodes:

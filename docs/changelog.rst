@@ -1,6 +1,15 @@
 What changed
 ============
 
+Unreleased
+----------
+
+* ``parsl_runner``'s ``retries`` takes effect: a failed task is resubmitted from the driver up to
+  ``retries`` times (default 3); it was ignored.
+* ``htcondor_runner``, ``submit_driverless`` and ``HTCondorBackend`` take ``task_timeout_s``, how long
+  one task may run on a pilot. Past it the task fails with a ``StageError`` caused by ``TaskTimedOut``, and its pilot stops and
+  frees its slot.
+
 0.0.5
 -----
 

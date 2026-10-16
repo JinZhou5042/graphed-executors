@@ -25,7 +25,7 @@ class SubmitCapabilities:
     peer_data_movement: bool  # future-dep data moves worker<->worker (dask: yes; parsl/HTEX: no)
     scatter_broadcast: bool  # a payload can be placed once and referenced by many tasks
     pin_to_worker: bool  # task -> named-worker affinity (dask workers=; parsl: none)
-    per_task_retries: bool  # retries per submit (dask retries=; parsl: Config-global only)
+    per_task_retries: bool  # the library retries per submit (dask retries=; parsl: DFK only)
     per_task_resources: bool  # per-task cores/mem/gpu (dask resources=; HTEX: priority only)
     cancel_running: bool  # a RUNNING task can be cancelled (dask best-effort; parsl: none)
     worker_file_cache: bool  # worker-side file caching survives across tasks (TaskVine/WQ: yes)

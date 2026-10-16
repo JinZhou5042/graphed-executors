@@ -243,7 +243,7 @@ jobs:
             tests/frozen/m63/test_m63_submit_parsl.py \
             tests/frozen/m65/test_m65a3_control_parsl.py \
             tests/frozen/m68c/test_m68c_submit_parsl.py \
-            tests/frozen/m74/test_m74_parsl.py \
+            tests/frozen/m74/test_m74_parsl.py tests/extra/hdna/test_hdna_parsl_retries.py \
             --cov --cov-config=.coveragerc-parsl \
             --cov-branch --cov-fail-under=0
           # settle: force any lingering HTEX pool workers to flush their subprocess coverage
@@ -370,6 +370,7 @@ jobs:
             tests/frozen/m69b/test_histserv_cluster.py tests/frozen/m69b/test_histserv_managed.py \
             tests/frozen/m69b/test_service_order.py tests/extra/m69b \
             tests/frozen/m74/test_m74_htcondor.py tests/extra/m74 \
+            tests/extra/hdna/test_hdna_htcondor_task_timeout.py \
             --cov --cov-config=.coveragerc-htcondor \
             --cov-branch --cov-fail-under=0
           mv .coverage .coverage.driver

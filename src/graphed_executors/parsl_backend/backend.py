@@ -20,6 +20,8 @@ This module imports NOTHING from parsl at load (the ``_lazy`` accessor + the par
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, InvalidStateError
+from contextlib import suppress
 from typing import Any, cast
 
 from graphed_executors.submit import SubmitCapabilities, SubmitRunner
@@ -165,12 +167,17 @@ class ParslBackend:
         False), then submit the concrete values wrapped in the module-level shim. ``resource_spec``
         is ``{"priority": p}`` on HTEX iff ``p != 0`` (the one key HTEX forwards, executor.py:393)
         else ``{}``; ALWAYS ``{}`` on TPE (measured: it raises ``InvalidResourceSpecification`` on
-        anything else). ``key``/``retries``/``resources``/``workers`` are advisory hints this
-        all-False backend silently ignores (correctness never depends on them). The shim wrap happens
-        HERE, after any spy seam, so a submitted-fn-name witness records the raw ``fn`` (design-minor-3)."""
+        anything else). A failed task is resubmitted from the driver up to ``retries`` times: parsl's
+        own retries live in the DFK this backend does not use. ``key``/``resources``/``workers`` are
+        advisory hints this backend ignores. The shim wrap happens HERE, after any spy seam, so a
+        submitted-fn-name witness records the raw ``fn`` (design-minor-3)."""
         resolved = tuple(a.result() if isinstance(a, _ParslFuture) else a for a in args)
         spec: dict[str, int] = {"priority": priority} if (self._is_htex and priority) else {}
-        raw = self._executor.submit(_parsl_task_shim, spec, fn, *resolved)
+
+        def attempt() -> Any:
+            return self._executor.submit(_parsl_task_shim, spec, fn, *resolved)
+
+        raw = attempt() if retries <= 0 else _resubmitting(attempt, retries, cancels=not self._is_htex)
         return _ParslFuture(raw, self._handlers)
 
     def broadcast(self, payload: bytes, *, token: str) -> object:
@@ -226,6 +233,38 @@ class ParslBackend:
                 return label, label
             node = node.__cause__ if node.__cause__ is not None else node.__context__
         return None
+
+
+def _resubmitting(attempt: Callable[[], Any], retries: int, *, cancels: bool) -> Future[Any]:
+    """A future of ``attempt()`` that calls ``attempt`` again on each failure, ``retries`` times at most.
+    With ``cancels``, cancelling it cancels the attempt in flight (never on HTEX: see ``cancel``)."""
+    outer: Future[Any] = Future()
+    current: list[Any] = []
+
+    def watch(raw: Any, left: int) -> None:
+        if raw.cancelled():
+            outer.cancel()
+            return
+        exc = raw.exception()
+        if exc is not None and left > 0 and not outer.cancelled():
+            try:
+                current[0] = attempt()
+            except Exception as resubmit:  # a raise in a done-callback is only logged: settle instead
+                exc = resubmit
+            else:
+                current[0].add_done_callback(lambda r: watch(r, left - 1))
+                return
+        with suppress(InvalidStateError):  # cancelled meanwhile
+            if exc is None:
+                outer.set_result(raw.result())
+            else:
+                outer.set_exception(exc)
+
+    current.append(attempt())
+    current[0].add_done_callback(lambda r: watch(r, retries))
+    if cancels:
+        outer.add_done_callback(lambda f: f.cancelled() and current[0].cancel())
+    return outer
 
 
 def parsl_runner(

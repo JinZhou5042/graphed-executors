@@ -107,6 +107,7 @@ def _runner(run: dict[str, Any], job: Path, log: TextIO) -> HTCondorRunner:
             announced=announced,
             schedd_locate=locate,
             dag_dir=run.get("dag_dir"),
+            task_timeout_s=run.get("task_timeout_s"),
         )
         on_error.callback(release_quietly, "the driver job's backend", backend.close)
         if announced:

@@ -3,7 +3,8 @@
 It registers with the driver's task server, beats from a daemon thread, and runs leased tasks one at a
 time until the server answers 410. It exits 0 when the driver is done with it and 2 when the driver
 refuses its signature. When the driver has been unreachable for a lease it sends itself SIGTERM, even in
-the middle of a task, so an orphan frees its batch slot.
+the middle of a task, so an orphan frees its batch slot; so does any beat answered 410 mid-task (a
+timed-out task, or the driver closing).
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ class _Driver:
         self.key = key
         self.lease_s = server.LEASE_S
         self.last_ok = time.monotonic()
+        self.busy = False
 
     def post(self, route: str, obj: object) -> tuple[int, bytes, str | None]:
         """POST ``obj`` signed; retries while the driver is unreachable for less than a lease."""
@@ -77,6 +79,8 @@ def _beat(driver: _Driver, me: str, beat_s: float) -> None:
     while status != 410:
         time.sleep(beat_s)
         status, _, _ = driver.post("/beat", me)
+    if driver.busy:
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 def main(argv: list[str]) -> int:
@@ -94,7 +98,10 @@ def main(argv: list[str]) -> int:
         if status == 410:
             return 0
         if status == 200:
-            driver.post("/result", (me, int(tid or -1), *_run(data)))
+            driver.busy = True
+            outcome = _run(data)
+            driver.busy = False
+            driver.post("/result", (me, int(tid or -1), *outcome))
 
 
 if __name__ == "__main__":

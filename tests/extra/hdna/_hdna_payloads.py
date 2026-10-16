@@ -45,3 +45,44 @@ def keep_first(a: Any, _b: Any) -> Any:
 
 def nothing() -> None:
     return None
+
+
+@dataclass(frozen=True)
+class FailFirst:
+    """A task process that raises on its first ``failures`` attempts at each partition and returns 1
+    after; each attempt leaves a marker file under ``marks``, so the count crosses worker processes."""
+
+    marks: str
+    failures: int = 1
+
+    def __call__(self, partition: Partition, resources: WorkerResources) -> int:
+        import os  # noqa: PLC0415
+
+        name = partition.uri.rsplit("/", 1)[-1]
+        done = sum(m.startswith(name + ".") for m in os.listdir(self.marks))
+        open(os.path.join(self.marks, f"{name}.{done}"), "w").close()
+        if done < self.failures:
+            raise RuntimeError(f"attempt {done} at {partition.uri}")
+        return 1
+
+
+@dataclass(frozen=True)
+class HangAt:
+    """Sleeps ``hang_s`` on the first ``hangs`` attempts at ``uri`` and returns 1 otherwise; each
+    attempt there leaves a file named by its pid under ``attempts``."""
+
+    uri: str
+    attempts: str
+    hangs: int
+    hang_s: float
+
+    def __call__(self, partition: Partition, resources: WorkerResources) -> int:
+        import os  # noqa: PLC0415
+        import time  # noqa: PLC0415
+
+        if partition.uri == self.uri:
+            done = len(os.listdir(self.attempts))
+            open(os.path.join(self.attempts, str(os.getpid())), "w").close()
+            if done < self.hangs:
+                time.sleep(self.hang_s)
+        return 1

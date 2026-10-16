@@ -694,6 +694,11 @@ The arguments you will change
        check of its services from a worker); 1 by default.
    * - ``retries``
      - Has no effect here. The only retry is the one re-run of a task whose pilot was lost.
+   * - ``task_timeout_s``
+     - How long one task may run on a pilot; ``None`` (the default) sets no limit. A task past it
+       fails with a ``StageError`` naming its partition, caused by ``TaskTimedOut``, and its pilot
+       stops and frees its slot. ``submit_driverless`` takes it too. Under ``resumable`` a rerun runs
+       only that task.
    * - ``service_hosts``
      - Where services the runner starts may run: a subset of the site's ``("driver", "cluster")``
        (`Schedulability`_).
