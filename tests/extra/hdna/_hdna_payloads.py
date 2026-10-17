@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import awkward as ak
+from graphed.awkward import AwkwardBackend
 from graphed.core import Partition
 from graphed.core.execution import WorkerResources
 
@@ -86,3 +87,39 @@ class HangAt:
             if done < self.hangs:
                 time.sleep(self.hang_s)
         return 1
+
+
+def scale_by(k: float) -> Any:
+    """A closure over ``k``: pickle by reference cannot name it."""
+    return lambda x: x * k
+
+
+def sum_all(values: Any) -> float:
+    return float(ak.sum(ak.Array(values[0])))
+
+
+def add(a: float, b: float) -> float:
+    return a + b
+
+
+def zero() -> float:
+    return 0.0
+
+
+LAMBDA_BEHAVIOR: dict[Any, Any] = {"unused": lambda x: x}  # vector's behavior holds lambdas like this
+
+
+def make_lambda_behavior_backend() -> AwkwardBackend:
+    return AwkwardBackend(behavior=LAMBDA_BEHAVIOR)
+
+
+def first(values: Any) -> Any:
+    return values[0]
+
+
+def concat(a: ak.Array, b: ak.Array) -> ak.Array:
+    return ak.concatenate([a, b])
+
+
+def empty_array() -> ak.Array:
+    return ak.Array([])

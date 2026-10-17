@@ -4,6 +4,11 @@ What changed
 Unreleased
 ----------
 
+Requires ``graphed`` 0.0.8 or later.
+
+* A plan whose op is a lambda or closure, or whose partials carry a behavior holding a lambda, runs on
+  ``ProcessPoolExecutor`` with ``comms=None`` and ``comms="ipc"``; it failed to pickle. The fix is in
+  ``graphed`` 0.0.8 (graphed#82).
 * ``parsl_runner``'s ``retries`` takes effect: a failed task is resubmitted from the driver up to
   ``retries`` times (default 3); it was ignored.
 * ``htcondor_runner``, ``submit_driverless`` and ``HTCondorBackend`` take ``task_timeout_s``, how long

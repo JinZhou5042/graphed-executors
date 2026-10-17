@@ -18,7 +18,7 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 # graphed carries the execution contract (Plan/Task/Partition), Session, and StageError.
-dependencies = ["graphed>=0.0.7", "cloudpickle"]
+dependencies = ["graphed>=0.0.8", "cloudpickle"]
 
 [project.optional-dependencies]
 # the backends + corpus are only needed to exercise realistic HEP analyses end-to-end in the suite
