@@ -246,12 +246,12 @@ jobs:
             tests/frozen/m74/test_m74_parsl.py tests/extra/hdna/test_hdna_parsl_retries.py \
             --cov --cov-config=.coveragerc-parsl \
             --cov-branch --cov-fail-under=0
-          # settle: force any lingering HTEX pool workers to flush their subprocess coverage
-          # (sigterm=true in .coveragerc-parsl) and let the files land, so the combine folds ALL
-          # worker data. The prompt-combine raced late worker flushes (review FU-2) and a
-          # scheduling-unlucky run could fold fewer files and dip the union toward 90.
-          pkill -TERM -f process_worker_pool || true
-          sleep 3
+          # TERM every leftover (pool managers, spawned workers, Manager servers, resource trackers) and
+          # combine once all have exited: combine fails on a data file still being written
+          LEFT='process_worker_pool|multiprocessing'
+          pkill -TERM -f "$LEFT" || true
+          for _ in $(seq 60); do pgrep -f "$LEFT" > /dev/null || break; sleep 1; done
+          if pgrep -fa "$LEFT"; then echo "::error::processes alive 60 s after SIGTERM"; exit 1; fi
           mv .coverage .coverage.driver
           coverage combine
           coverage report --show-missing --fail-under=90
