@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -24,7 +25,9 @@ from graphed_executors.htcondor_backend import SITES, CondorPilots
 from graphed_executors.htcondor_backend import announce as ann
 from graphed_executors.htcondor_backend.services import ServiceJob
 
-posix = pytest.mark.skipif(sys.platform == "win32", reason="announce.py starts its child with a preexec_fn")
+posix = pytest.mark.skipif(
+    sys.platform == "win32", reason="announce.py is POSIX-only: Windows delivers SIGTERM as TerminateProcess"
+)
 
 # a child that listens on its port (argv[1]) and exits with argv[2] after argv[3] seconds, or at once on
 # port argv[4]
@@ -155,6 +158,49 @@ def test_a_port_taken_after_the_scan_moves_on_to_the_next(
     assert port == high and child.poll() is None
     assert f"port {low} taken after the scan (the child exited 0), next" in capsys.readouterr().out
     assert asked[low] == 2
+
+
+# starts the child with announce's start() in a process whose at-fork child handler exits 86, as gRPC's
+# restarts its pollers in a forked child
+AT_FORK_PROBE = (
+    "import json, os, sys\n"
+    "from graphed_executors.htcondor_backend import announce as ann\n"
+    "os.register_at_fork(after_in_child=lambda: os._exit(86))\n"
+    "got = ann.start(json.loads(sys.argv[1]), 'localhost')\n"
+    "print(got if isinstance(got, str) else 'ready')\n"
+    "if not isinstance(got, str):\n"
+    "    ann.reap(got[0])\n"
+)
+
+
+@posix
+def test_the_child_never_runs_this_process_s_at_fork_handlers(job_dir: Path) -> None:
+    cfg = config(free_ports(1), argv=["{python}", "-c", LISTENER, "{port}", "0", "60", "0"])
+    probe = [sys.executable, "-c", AT_FORK_PROBE, json.dumps(cfg)]
+    got = subprocess.run(probe, cwd=job_dir, capture_output=True, text=True, timeout=60)
+    assert got.stdout.splitlines()[-1:] == ["ready"], got.stdout + got.stderr
+
+
+@posix
+def test_a_sigterm_during_the_start_stops_once_the_child_is_recorded(
+    job_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real, spawned = subprocess.Popen, []
+
+    def popen(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        spawned.append(real(*args, **kwargs))
+        ann.on_sigterm(signal.SIGTERM, None)  # delivered before Popen returned
+        return spawned[0]
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    previous = signal.getsignal(signal.SIGTERM)
+    cfg = config(free_ports(1), argv=["{python}", "-c", LISTENER, "{port}", "0", "60", "0"])
+    try:
+        with pytest.raises(ann._Stop):
+            ann.start(cfg, "localhost")
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert ann.CHILD[0] is spawned[0]
 
 
 def test_the_watched_pair_is_read_only_when_whole(tmp_path: Path) -> None:

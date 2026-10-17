@@ -18,7 +18,9 @@ from graphed_executors.submit import services as svc
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "frozen" / "m68d"))
 from m68d_harness import free_range
 
-posix = pytest.mark.skipif(sys.platform == "win32", reason="announce.py starts its child with a preexec_fn")
+posix = pytest.mark.skipif(
+    sys.platform == "win32", reason="announce.py is POSIX-only: Windows delivers SIGTERM as TerminateProcess"
+)
 LISTEN = "import socket, sys, time; s = socket.create_server(('', int(sys.argv[1]))); time.sleep(60)"
 
 

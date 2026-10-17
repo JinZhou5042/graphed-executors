@@ -9,6 +9,8 @@ Unreleased
 * ``htcondor_runner``, ``submit_driverless`` and ``HTCondorBackend`` take ``task_timeout_s``, how long
   one task may run on a pilot. Past it the task fails with a ``StageError`` caused by ``TaskTimedOut``, and its pilot stops and
   frees its slot.
+* A cluster-hosted service's ``announce.py`` starts its child without a ``preexec_fn``, so the child no
+  longer runs the job's at-fork handlers before exec; under gRPC those could abort it (#53).
 
 0.0.5
 -----

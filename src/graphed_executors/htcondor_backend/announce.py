@@ -34,7 +34,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Any, NoReturn
+from typing import Any
 
 SIG_HEADER = "X-Graphed-Sig"
 RUN_DIR = "service"
@@ -53,6 +53,7 @@ class _Stop(BaseException):
 
 
 CHILD: list[subprocess.Popen[bytes] | None] = [None]  # the child being started or served
+STARTING = [False, False]  # a start is in flight; a SIGTERM arrived during it
 
 
 def log(msg: str) -> None:
@@ -185,15 +186,13 @@ def hard_reap(pid: int | None) -> None:
         return
 
 
-def on_sigterm(signum: int, frame: object) -> NoReturn:
+def on_sigterm(signum: int, frame: object) -> None:
     # never waits: the interrupted main thread may hold Popen's waitpid lock
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if STARTING[0]:
+        STARTING[1] = True
+        return
     raise _Stop
-
-
-def unblock_sigterm() -> None:
-    if sys.platform != "win32":
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
 
 
 def interpreter(name: str) -> str:
@@ -223,18 +222,18 @@ def start(
             for token, value in {**subs, "{port}": str(port)}.items():
                 arg = arg.replace(token, value)
             argv.append(arg)
-        # SIGTERM stays blocked until the child is recorded; the child unblocks it before exec
-        if sys.platform != "win32":
-            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        # a SIGTERM waits until the child is recorded; a preexec_fn would make the child run this
+        # process's at-fork handlers (gRPC restarts its pollers there) before exec
+        STARTING[:] = [True, False]
         try:
-            child = subprocess.Popen(
-                argv, env={**os.environ, **cfg["env"]}, cwd=RUN_DIR, preexec_fn=unblock_sigterm
-            )
+            child = subprocess.Popen(argv, env={**os.environ, **cfg["env"]}, cwd=RUN_DIR)
             CHILD[0] = child
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return f"cannot start {argv[0]}: {exc!r}"
         finally:
-            unblock_sigterm()
+            STARTING[0] = False
+            if STARTING[1]:
+                raise _Stop
         while True:
             if child.poll() is not None:
                 if free(port):
