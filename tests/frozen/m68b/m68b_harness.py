@@ -242,6 +242,22 @@ def wildcard_listener(port: int) -> Iterator[socket.socket]:
         s.close()
 
 
+@contextlib.contextmanager
+def held_range(n: int = 3) -> Iterator[tuple[int, int]]:
+    """``free_range(n)`` with its first port held by a ``wildcard_listener``; a range whose first port
+    another socket took after the check is dropped for a fresh one."""
+    for _ in range(200):
+        low, high = free_range(n)
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(wildcard_listener(low))
+            except OSError:
+                continue
+            yield (low, high)
+            return
+    raise AssertionError(f"no {n} consecutive free ports could be held")
+
+
 # ---- HTTP and the task server's signing (the m66 auth pieces) --------------------------------------
 
 

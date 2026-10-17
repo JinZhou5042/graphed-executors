@@ -47,6 +47,7 @@ from m68b_harness import (
     fake_venv,
     free_range,
     get_within,
+    held_range,
     htcondor_api,
     http_get,
     http_status,
@@ -67,7 +68,6 @@ from m68b_harness import (
     wait_announce,
     wait_for,
     web_spec,
-    wildcard_listener,
     write_job,
     write_machine_ad,
 )
@@ -1036,8 +1036,8 @@ def test_sigterm_during_the_orphan_reap_ends_within_the_bound(tmp_path: Path, ma
 
 @posix
 def test_a_held_first_port_announces_the_next(tmp_path: Path, machine_ad: Path, identity: str) -> None:
-    low, high = free_range(3)
-    with task_server() as server, wildcard_listener(low):
+    # the server binds first, so its port is taken before the range is checked
+    with task_server() as server, held_range(3) as (low, high):
         secret = server.announce_secret(["k1"])
         cfg = job_config(key="k1", url=server.url, ports=[low, high])
         job = write_job(tmp_path / "job", cfg, secret)
