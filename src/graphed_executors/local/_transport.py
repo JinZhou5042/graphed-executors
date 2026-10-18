@@ -133,10 +133,11 @@ class QueueTransport:
     (threads / in-process) or :class:`PipeInbox` (processes) — it only calls ``put_nowait`` /
     ``get_nowait`` / ``get``, so the queue type is the caller's choice."""
 
-    def __init__(self, address: str, inbox: Any, outboxes: dict[str, Any]) -> None:
+    def __init__(self, address: str, inbox: Any, outboxes: dict[str, Any], via: Any = None) -> None:
         self.address = address
         self._inbox = inbox
         self._outboxes = outboxes  # peer address -> that peer's inbox queue
+        self._via = via  # the driver's inbox, which forwards a ``node`` for a peer outside ``outboxes``
 
     def peers(self) -> tuple[str, ...]:
         return tuple(self._outboxes)
@@ -144,7 +145,9 @@ class QueueTransport:
     def send(self, dest: str, message: object) -> bool:
         q = self._outboxes.get(dest)
         if q is None:
-            return False
+            if self._via is None or not (isinstance(message, tuple) and message[0] == "node"):
+                return False
+            q, message = self._via, ("via", dest, message)
         try:
             q.put_nowait((self.address, message))
             return True

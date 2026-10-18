@@ -16,6 +16,8 @@ Requires ``graphed`` 0.0.8 or later.
   frees its slot.
 * A cluster-hosted service's ``announce.py`` starts its child without a ``preexec_fn``, so the child no
   longer runs the job's at-fork handlers before exec; under gRPC those could abort it (#53).
+* A persistent ``PinnedPoolExecutor`` keeps its worker processes when a plan's task count changes;
+  it respawned them on every such run, which on a slow Windows runner could exhaust the root timeout (#30).
 
 0.0.5
 -----

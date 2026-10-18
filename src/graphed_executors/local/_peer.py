@@ -735,7 +735,8 @@ def _worker_proc_resources() -> LocalResources:
 # ---- identity-pinned worker specialisation (M38 P7), driven by PinnedProcessPool -----------------
 #
 # An identity-pinned worker is spawned ONCE, owns ``address`` for life, and inherits ONLY its inbox +
-# the outboxes of its O(log N) overlay peers (so the IPC registry is sub-quadratic, not O(N²)). The
+# the outboxes of its O(log N) overlay peers (so the IPC registry is sub-quadratic, not O(N²)). A later
+# run whose merge targets fall outside that overlay sends those nodes through the driver. The
 # pool delivers each run's ``_pinned_peer_actor`` call over a per-worker control channel SEPARATE from
 # the reduction transport, so reduction/steal messages that race ahead simply wait in the transport
 # inbox (no buffering hack) and the witness/error come back as the call's Future result.
@@ -749,7 +750,7 @@ def pinned_peer_init(
     """``PinnedProcessPool`` per-worker initializer: stash this worker's identity + its inherited
     transport (inbox + the O(log N) outboxes) + its steal lifelines as a process global."""
     global _pinned
-    _pinned = (address, QueueTransport(address, inbox, outboxes), steal_peers)
+    _pinned = (address, QueueTransport(address, inbox, outboxes, via=outboxes[DRIVER]), steal_peers)
 
 
 def pinned_peer_actor(

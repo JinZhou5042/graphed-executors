@@ -196,7 +196,9 @@ is 1024, but already at 32 where it is 256.
 its merge targets, and a small set of peers it may steal work from. Those peers are laid out as
 a hypercube — a wiring in which every worker reaches every other in ``log N`` hops while holding
 only ``log N`` addresses — so the whole address book is ``N log N`` instead of ``N²``. Same
-results, bit for bit; smaller footprint.
+results, bit for bit; smaller footprint. A persistent pool keeps its workers when a later plan has
+a different number of tasks: a merge target outside a worker's address book is reached through the
+driver.
 
 ``ProcessPoolExecutor`` warns and names ``PinnedPoolExecutor`` when its worker count would
 strain the descriptor budget. It warns rather than switching, so the pool you get is always the
