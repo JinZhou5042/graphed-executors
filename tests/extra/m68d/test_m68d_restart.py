@@ -4,6 +4,7 @@ job as a start that never became ready (exit 3). ``announce.py`` runs in process
 from __future__ import annotations
 
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pytest
 from graphed_executors.htcondor_backend import announce as ann
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "frozen" / "m68d"))
-from m68d_harness import free_range
+from m68d_harness import free_range, write_machine_ad
 
 posix = pytest.mark.skipif(
     sys.platform == "win32", reason="announce.py is POSIX-only: Windows delivers SIGTERM as TerminateProcess"
@@ -28,6 +29,9 @@ def test_a_restart_with_no_port_left_ends_the_job_with_3(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    # a slot's job checks its child at its ad's Machine, never at an fqdn that may resolve to nothing
+    monkeypatch.setattr(socket, "getfqdn", lambda name="": "unresolvable.invalid")
+    monkeypatch.setenv("_CONDOR_MACHINE_AD", str(write_machine_ad(tmp_path / "machine.ad", "127.0.0.1")))
     port, _ = free_range(1)
     cfg: dict[str, object] = {
         "argv": ["{python}", "-c", SHORT_LIVED, "{port}"],

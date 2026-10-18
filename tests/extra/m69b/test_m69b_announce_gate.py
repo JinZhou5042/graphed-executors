@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import json
 import pickle
+import socket
 import sys
 import threading
 import time
@@ -113,6 +114,14 @@ def test_a_need_between_a_set_s_services_leaves_the_pilots_held_to_its_last_anno
     assert order.acts(order.between(schedd.events, "web2 announced"), "Release")[:1] == releases, inside
 
 
+@pytest.fixture
+def in_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A driver job in a slot whose machine ad names it ``127.0.0.1``, on a host whose fqdn resolves to
+    nothing (as a macOS reverse lookup's ``…ip6.arpa`` can): the job is dialled at its ad's ``Machine``."""
+    monkeypatch.setattr(socket, "getfqdn", lambda name="": "unresolvable.invalid")
+    monkeypatch.setenv("_CONDOR_MACHINE_AD", str(harness.write_machine_ad(tmp_path / "machine.ad")))
+
+
 def driver_job(tmp_path: Path, services: tuple[str, ...]) -> tuple[Path, Path]:
     """A DAG driver job's dir over pilots="condor", each of ``services`` a SERVICE node; and its DAG dir."""
     job, dag = tmp_path / "job", tmp_path / "dag"
@@ -159,6 +168,7 @@ def service_node(schedd: Any, dag: Path, node: Path) -> threading.Thread:
     return thread
 
 
+@pytest.mark.usefixtures("in_slot")
 def test_a_driver_job_submits_its_pilots_after_its_service_node_announced(tmp_path: Path) -> None:
     job, dag = driver_job(tmp_path, ("web",))
     with harness.CountingHTTPServer() as service, pytest.MonkeyPatch.context() as mp:
@@ -177,6 +187,7 @@ def test_a_driver_job_submits_its_pilots_after_its_service_node_announced(tmp_pa
     assert kinds.index("announce") < kinds.index("submit-pilots"), kinds
 
 
+@pytest.mark.usefixtures("in_slot")
 @pytest.mark.parametrize("services", [(), ("web",)], ids=["no-services", "services"])
 def test_a_driver_job_whose_pilots_never_start_exits_1(
     services: tuple[str, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
