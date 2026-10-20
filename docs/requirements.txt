@@ -2,4 +2,4 @@
 # so the rendered API reference matches the version these pages were written against.
 # The [awkward,numpy] extras supply the backends that graphed-executors' autosummary imports at
 # doc-build time.
-graphed[awkward,numpy]==0.0.8
+graphed[awkward,numpy]==0.0.9
