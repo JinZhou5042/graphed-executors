@@ -20,7 +20,10 @@ from graphed_executors.local import ProcessPoolExecutor
 from graphed_executors.local._peer import make_bounds, process_and_reduce
 
 
-def test_an_unpicklable_partial_surfaces_its_pickling_error_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("comms", ["ipc", "http"])
+def test_an_unpicklable_partial_surfaces_its_pickling_error_promptly(
+    comms: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(local_executors, "_PEER_ROOT_TIMEOUT_S", 30.0)
     session = Session(AwkwardBackend())
     form = AwkwardForm(ak.Array(EVENTS.layout.to_typetracer(forget_length=True)))
@@ -34,7 +37,7 @@ def test_an_unpicklable_partial_surfaces_its_pickling_error_promptly(monkeypatch
     )
     start = time.monotonic()
     with pytest.raises(pickle.PicklingError, match="this partial does not pickle"):
-        ProcessPoolExecutor(max_workers=2, comms="ipc").run(plan)
+        ProcessPoolExecutor(max_workers=2, comms=comms).run(plan)
     assert time.monotonic() - start < 30.0
 
 

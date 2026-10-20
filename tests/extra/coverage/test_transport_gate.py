@@ -141,7 +141,7 @@ def test_http_sender_skips_a_message_whose_dest_left_the_registry() -> None:
     transport = HttpTransport("w0")
     try:
         lane = transport._lane("ghost")  # starts the real sender thread; "ghost" is not in the registry
-        lane.put("orphan")
+        lane.put(b"orphan")
         time.sleep(0.3)  # the sender wakes (0.1s poll), target lookup misses, `continue`s
         # neither counter moved: the message was skipped before the deliver-or-drop accounting ran
         assert (transport.deliveries, transport.drops) == (0, 0)

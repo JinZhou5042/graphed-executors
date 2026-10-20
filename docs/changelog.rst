@@ -23,6 +23,10 @@ Requires ``graphed`` 0.0.8 or later.
   through cloudpickle on every route (``comms=None``, ``pooled_combines``, ``"ipc"``, ``"http"``); it
   failed to pickle. HTCondor pilots and the HTCondor driver job carry such results the same way.
   Values stdlib pickle accepts are still sent with it (#65).
+* With ``comms="http"``, a peer partial that fails to pickle raises its pickling error at once, as it
+  does with ``comms="ipc"``; the run ended in the root timeout instead (#67).
+* A ``ProcessPoolExecutor`` peer run interrupted while its workers are being submitted releases the
+  workers already started; with ``comms="ipc"`` the pool shutdown that followed hung (#70).
 
 0.0.5
 -----

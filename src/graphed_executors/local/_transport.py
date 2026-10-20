@@ -266,7 +266,7 @@ class HttpTransport:
         self.port = int(self._server.server_address[1])
         self._registry: dict[str, tuple[str, int]] = {}
         self._maxsize = maxsize
-        self._lanes: dict[str, tuple[queue.Queue[object], threading.Thread]] = {}
+        self._lanes: dict[str, tuple[queue.Queue[bytes | None], threading.Thread]] = {}
         self._lock = threading.Lock()  # guards _lanes and the two counters below
         self.deliveries = 0  # POSTs that got a response (witness/diagnostic)
         self.drops = 0  # messages dropped after exhausting retries
@@ -285,17 +285,22 @@ class HttpTransport:
     def send(self, dest: str, message: object) -> bool:
         if dest not in self._registry or dest == self.address:
             return False
+        # pickled here, not on the lane thread, so an unpicklable message raises to the caller
         try:
-            self._lane(dest).put_nowait(message)  # non-blocking; the lane's thread does the POST
+            body = pickle.dumps((self.address, message))
+        except PICKLE_ERRORS:
+            body = pickle.dumps((self.address, Portable(message)))
+        try:
+            self._lane(dest).put_nowait(body)  # non-blocking; the lane's thread does the POST
             return True
         except queue.Full:
             return False
 
-    def _lane(self, dest: str) -> queue.Queue[object]:
+    def _lane(self, dest: str) -> queue.Queue[bytes | None]:
         with self._lock:
             lane = self._lanes.get(dest)
             if lane is None:
-                q: queue.Queue[object] = queue.Queue(maxsize=self._maxsize)
+                q: queue.Queue[bytes | None] = queue.Queue(maxsize=self._maxsize)
                 t = threading.Thread(
                     target=self._sender,
                     args=(dest, q),
@@ -327,21 +332,17 @@ class HttpTransport:
             if self._stop.is_set():
                 return None
 
-    def _sender(self, dest: str, lane: queue.Queue[object]) -> None:
+    def _sender(self, dest: str, lane: queue.Queue[bytes | None]) -> None:
         while not self._stop.is_set():
             try:
-                message = lane.get(timeout=0.1)
+                body = lane.get(timeout=0.1)
             except queue.Empty:
                 continue
-            if message is None:
+            if body is None:
                 break
             target = self._registry.get(dest)
             if target is None:
                 continue
-            try:
-                body = pickle.dumps((self.address, message))
-            except PICKLE_ERRORS:
-                body = pickle.dumps((self.address, Portable(message)))
             url = f"http://{target[0]}:{target[1]}/msg"
             # the sender thread is off the data path, so it RETRIES on a transient failure: peer
             # reduction needs delivery (a lost partial = wrong/missing result), and the receiver

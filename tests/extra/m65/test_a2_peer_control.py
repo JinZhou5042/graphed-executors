@@ -15,19 +15,20 @@ from graphed_executors.local import ProcessPoolExecutor, _peer, executors
 from graphed_executors.local._reduce import lazy_tree_reduce, running_fold
 
 ONES = (1,) * mp.N
+ROOT_TIMEOUT_S = 10.0  # headroom for the unpaused work on a loaded runner
 
 
 @pytest.mark.parametrize("route", ["thread-ipc", "proc-ipc"])
 def test_paused_time_does_not_count_toward_the_root_deadline(
     route: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(executors, "_PEER_ROOT_TIMEOUT_S", 3.0)
+    monkeypatch.setattr(executors, "_PEER_ROOT_TIMEOUT_S", ROOT_TIMEOUT_S)
     ctl = RunControl()
     rec = mp.Recorder(on_first_finished=ctl.pause)
     ex = mp.ROUTES[route].make(rec, control=ctl)
     run = mp.Background(lambda: ex.run(mp.make_plan(mp.Probe(sleep_s=0.01))))
     assert rec.first_finished.wait(30)
-    time.sleep(4.0)
+    time.sleep(ROOT_TIMEOUT_S + 1.0)  # longer than the deadline, so counting it would time out
     ctl.resume()
     res = run.result()
     assert (res.value, res.stopped) == (ONES, StopReason.EXHAUSTED)

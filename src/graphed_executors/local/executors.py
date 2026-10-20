@@ -1202,8 +1202,9 @@ class _ProcessExecutorBase(_BaseExecutor):
             # They land AFTER run() returns, so a reused pool cannot be cleaned by draining at the
             # start of the next run — that run would take the stale `done` as its first message and
             # its worker would leave the actor before reducing anything. Drop the persistent peer
-            # state instead; the next run respawns. Bounded because ``_collect_peer`` releases the
-            # workers on every exit: the surviving actors return within ``OUTBOX_EXIT_WAIT_S``.
+            # state instead; the next run respawns. Bounded because ``_peer_ipc``/``_peer_http`` release
+            # the workers on every exit (http: once the registry is out): the surviving actors return
+            # within ``OUTBOX_EXIT_WAIT_S``.
             self._close_peer()
             raise
 
@@ -1323,6 +1324,9 @@ class _ProcessExecutorBase(_BaseExecutor):
                     for a in worker_addrs
                 ]
             return self._collect_peer(driver_t, plan, n, futs, pool, control)
+        except BaseException:
+            release_workers(driver_t)  # from the first submit on, not only once _collect_peer is running
+            raise
         finally:
             if not self._persistent:
                 pool.shutdown()
@@ -1384,6 +1388,9 @@ class _ProcessExecutorBase(_BaseExecutor):
             ]
             http_driver_handshake(driver_t, worker_addrs, timeout_s=_WORKER_START_TIMEOUT_S)
             return self._collect_peer(driver_t, plan, n, futs, pool, control)
+        except BaseException:
+            release_workers(driver_t)  # from the first submit on, not only once _collect_peer is running
+            raise
         finally:
             driver_t.close()
             if not self._persistent:
