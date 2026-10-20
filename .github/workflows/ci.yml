@@ -288,6 +288,8 @@ jobs:
     name: test-htcondor py3.12
     runs-on: ubuntu-latest
     timeout-minutes: 45  # m68a: + pulling the Triton image (several GB) and its model load
+    env:
+      GRAPHED_EXECUTORS_SRC: ${{ github.workspace }}/src  # .coveragerc-htcondor's absolute source root
     steps:
       - uses: actions/checkout@v4
         with:

@@ -6,9 +6,18 @@
 branch = true
 parallel = true
 sigterm = true
+# Directories, not dotted names: coverage resolves a dotted name by importing its parent package and
+# then evicting what that import loaded from sys.modules, which broke later pickling (#71). CI sets
+# GRAPHED_EXECUTORS_SRC to an absolute path, since pilots and services run in other directories.
 source =
-    graphed_executors.htcondor_backend
-    graphed_executors.submit.services
+    ${GRAPHED_EXECUTORS_SRC-src}/graphed_executors/htcondor_backend
+    ${GRAPHED_EXECUTORS_SRC-src}/graphed_executors/submit
+omit =
+    */graphed_executors/submit/__init__.py
+    */graphed_executors/submit/engine.py
+    */graphed_executors/submit/protocol.py
+    */graphed_executors/submit/recipes.py
+    */graphed_executors/submit/threadpool.py
 
 [report]
 fail_under = 90

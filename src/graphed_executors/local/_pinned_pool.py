@@ -21,10 +21,25 @@ buffering dance here.
 from __future__ import annotations
 
 import contextlib
+import multiprocessing
+import os
 import threading
 from collections.abc import Callable
 from concurrent.futures import Executor, Future
 from typing import Any
+
+
+def exit_with_driver() -> None:
+    """Pool-worker initializer step: exit this process once the driver that spawned it dies. A pool
+    worker otherwise waits on its call queue forever, since every worker holds a write end of it."""
+    parent = multiprocessing.parent_process()
+    if parent is not None:
+        threading.Thread(target=_exit_after, args=(parent,), name="graphed-driver-watch", daemon=True).start()
+
+
+def _exit_after(parent: Any) -> None:
+    parent.join()
+    os._exit(1)
 
 
 def _pinned_loop(
@@ -36,6 +51,7 @@ def _pinned_loop(
     """The generic pinned-worker body: run the per-worker initializer once (inheriting this worker's
     resources), then serve ``(cid, fn, args)`` calls from this worker's control queue until the
     shutdown sentinel, returning each result (or a picklable error) on the shared result queue."""
+    exit_with_driver()
     init_fn(*init_args)
     while True:
         item = call_q.get()

@@ -27,6 +27,11 @@ Requires ``graphed`` 0.0.8 or later.
   does with ``comms="ipc"``; the run ended in the root timeout instead (#67).
 * A ``ProcessPoolExecutor`` peer run interrupted while its workers are being submitted releases the
   workers already started; with ``comms="ipc"`` the pool shutdown that followed hung (#70).
+* Every exit of a peer run ends its workers' waits through one release pipe the driver closes. A
+  ``comms="http"`` run interrupted before the registry handshake no longer hangs its pool shutdown
+  (#72), and an interrupted ``ThreadExecutor`` peer run returns at once and leaves no actor thread
+  behind; it waited 30 s per thread.
+* Process-pool workers exit when their driver process dies; they waited for work forever.
 
 0.0.5
 -----

@@ -77,7 +77,7 @@ from ._peer import (
     slice_items,
     worker_outbox_addresses,
 )
-from ._pinned_pool import PinnedProcessPool
+from ._pinned_pool import PinnedProcessPool, exit_with_driver
 from ._portable import Portable
 from ._reduce import LazyReducer, plan_tree, running_fold, tree_reduce
 from ._transport import HttpTransport, PipeInbox, QueueTransport, build_transports
@@ -216,6 +216,7 @@ def _proc_init(
         _proc_drain_stop.set()
     if _proc_drain_thread is not None:
         _proc_drain_thread.join(timeout=_PROC_EXIT_JOIN_S)
+    exit_with_driver()
     _proc_resources = LocalResources()
     _proc_event_q = event_q
     _proc_profiler = _proc_buffer = _proc_drain_stop = _proc_drain_thread = _proc_monitor = None
@@ -1033,6 +1034,7 @@ class ThreadExecutor(_BaseExecutor):
         witness: dict[str, dict[str, int]] = {}
         complete = complete_events(self._run_monitor)
         errors: dict[str, BaseException] = {}  # a worker thread's exception (captured, then re-raised)
+        release_r, release_w = multiprocessing.Pipe(duplex=False)  # EOF once the driver closes it
 
         def actor(addr: str) -> None:
             try:
@@ -1052,6 +1054,7 @@ class ThreadExecutor(_BaseExecutor):
                     lean=self._run_lean,
                     keys=self._run_keys,
                     complete=complete,
+                    release=release_r,
                 )
             except BaseException as exc:  # a thread exception is otherwise lost -> capture + propagate
                 errors[addr] = exc
@@ -1062,9 +1065,9 @@ class ThreadExecutor(_BaseExecutor):
         ]
         driver_t = transports["driver"]
         ctl = PeerControl(control, driver_t, n, plan.combine, plan.empty) if control is not None else None
-        for t in threads:
-            t.start()
         try:
+            for t in threads:
+                t.start()
             deadline = time.monotonic() + _PEER_ROOT_TIMEOUT_S
             out: tuple[R, int] | None = None
             while out is None:
@@ -1097,10 +1100,13 @@ class ThreadExecutor(_BaseExecutor):
             assert out is not None
             return out
         finally:
+            release_w.close()  # first: the joins below wait on actors that only this ends
             if ctl is not None:
                 ctl.close(0.0)
             for t in threads:
-                t.join(timeout=30.0)
+                if t.is_alive():  # an interrupt can land before every thread started
+                    t.join(timeout=30.0)
+            release_r.close()
             for tr in transports.values():
                 tr.close()
             self._last_peer_witness = [witness[a] for a in worker_addrs if a in witness]
@@ -1202,9 +1208,8 @@ class _ProcessExecutorBase(_BaseExecutor):
             # They land AFTER run() returns, so a reused pool cannot be cleaned by draining at the
             # start of the next run — that run would take the stale `done` as its first message and
             # its worker would leave the actor before reducing anything. Drop the persistent peer
-            # state instead; the next run respawns. Bounded because ``_peer_ipc``/``_peer_http`` release
-            # the workers on every exit (http: once the registry is out): the surviving actors return
-            # within ``OUTBOX_EXIT_WAIT_S``.
+            # state instead; the next run respawns. Bounded because every exit closes the run's release
+            # pipe: the surviving actors return within ``OUTBOX_EXIT_WAIT_S``.
             self._close_peer()
             raise
 
@@ -1278,6 +1283,7 @@ class _ProcessExecutorBase(_BaseExecutor):
                 self._peer_pool, self._peer_registry, self._peer_driver = pool, registry, driver_t
                 self._peer_nworkers, self._peer_pinned = w, pinned
         factory = self._peer_profiler_factory()
+        release_r, release_w = ctx.Pipe(duplex=False)  # the run's release: EOF once the driver closes it
         try:
             if pinned:
                 ppool = cast(PinnedProcessPool, pool)
@@ -1297,6 +1303,7 @@ class _ProcessExecutorBase(_BaseExecutor):
                         self._run_lean,
                         self._run_keys,
                         complete_events(self._run_monitor),
+                        release_r,
                         worker=i,
                     )
                     for i, a in enumerate(worker_addrs)
@@ -1320,14 +1327,14 @@ class _ProcessExecutorBase(_BaseExecutor):
                         lean=self._run_lean,
                         keys=self._run_keys,
                         complete=complete_events(self._run_monitor),
+                        release=release_r,
                     )
                     for a in worker_addrs
                 ]
             return self._collect_peer(driver_t, plan, n, futs, pool, control)
-        except BaseException:
-            release_workers(driver_t)  # from the first submit on, not only once _collect_peer is running
-            raise
         finally:
+            release_w.close()  # first: the shutdown below joins actors that only this ends
+            release_r.close()
             if not self._persistent:
                 pool.shutdown()
                 _close_registry(registry)
@@ -1357,12 +1364,13 @@ class _ProcessExecutorBase(_BaseExecutor):
             pool = cast("_StdProcessPool", self._peer_pool)
         else:
             self._close_peer()
-            pool = _StdProcessPool(max_workers=w, mp_context=ctx)
+            pool = _StdProcessPool(max_workers=w, mp_context=ctx, initializer=exit_with_driver)
             if self._persistent:
                 self._peer_pool, self._peer_nworkers = pool, w
         assert pool is not None
         driver_t = HttpTransport("driver")
         factory = self._peer_profiler_factory()
+        release_r, release_w = ctx.Pipe(duplex=False)  # the run's release: EOF once the driver closes it
         try:
             futs = [
                 pool.submit(
@@ -1383,15 +1391,15 @@ class _ProcessExecutorBase(_BaseExecutor):
                     lean=self._run_lean,
                     keys=self._run_keys,
                     complete=complete_events(self._run_monitor),
+                    release=release_r,
                 )
                 for a in worker_addrs
             ]
             http_driver_handshake(driver_t, worker_addrs, timeout_s=_WORKER_START_TIMEOUT_S)
             return self._collect_peer(driver_t, plan, n, futs, pool, control)
-        except BaseException:
-            release_workers(driver_t)  # from the first submit on, not only once _collect_peer is running
-            raise
         finally:
+            release_w.close()  # first: the shutdown below joins actors that only this ends
+            release_r.close()
             driver_t.close()
             if not self._persistent:
                 pool.shutdown()

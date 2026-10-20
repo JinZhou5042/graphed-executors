@@ -10,8 +10,10 @@ from __future__ import annotations
 import configparser
 import re
 import tomllib
+from fnmatch import fnmatch
 from typing import Any
 
+from coverage.misc import substitute_variables
 from htcondor_harness import REPO_ROOT
 
 
@@ -36,11 +38,23 @@ def test_coveragerc_htcondor_gates_exactly_the_backend() -> None:
     assert path.is_file(), ".coveragerc-htcondor is missing"
     parser = configparser.ConfigParser()
     parser.read(path)
-    sources = {line.strip() for line in parser.get("run", "source").splitlines() if line.strip()}
     # amended at m68a (owner ruling, 2026-09-28): plan-services §6 adds the engine's service set, which
-    # these suites drive through pilots and driver jobs; nothing else may join the backend
-    assert "graphed_executors.htcondor_backend" in sources, sources
-    assert sources - {"graphed_executors.htcondor_backend"} <= {"graphed_executors.submit.services"}, sources
+    # these suites drive through pilots and driver jobs; nothing else may join the backend.
+    # refrozen (owner ruling, 2026-10-20, #71): sources are directories, since coverage imports a dotted
+    # name's parent package and then evicts what it loaded from sys.modules.
+    entries = [substitute_variables(line.strip(), {}) for line in parser.get("run", "source").splitlines() if line]
+    roots = [(REPO_ROOT / e).resolve() for e in entries if e]
+    assert roots and all(r.is_dir() for r in roots), entries
+    omit = [line.strip() for line in parser.get("run", "omit", fallback="").splitlines() if line.strip()]
+    pkg = (REPO_ROOT / "src" / "graphed_executors").resolve()
+    measured = {
+        p.relative_to(pkg).as_posix()
+        for p in pkg.rglob("*.py")
+        if any(r == p.parent or r in p.parents for r in roots) and not any(fnmatch(p.as_posix(), o) for o in omit)
+    }
+    expected = {p.relative_to(pkg).as_posix() for p in (pkg / "htcondor_backend").rglob("*.py")}
+    expected.add("submit/services.py")
+    assert measured == expected, sorted(measured ^ expected)
     assert parser.getboolean("run", "branch") is True
     assert parser.getboolean("run", "parallel") is True
     assert parser.getboolean("run", "sigterm") is True

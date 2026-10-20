@@ -41,7 +41,7 @@ def test_interrupted_driver_releases_the_workers(persistent: bool, tmp_path: Pat
     assert out.read_text() == "interrupted"
 
 
-def _child_interrupted_mid_submit(persistent: bool, out_path: str) -> None:
+def _child_interrupted_mid_submit(persistent: bool, comms: str, out_path: str) -> None:
     real = StdPool.submit
     submitted: list[object] = []
 
@@ -52,7 +52,9 @@ def _child_interrupted_mid_submit(persistent: bool, out_path: str) -> None:
             raise KeyboardInterrupt  # where a SIGINT lands while the first submit spawns the workers
         return fut
 
-    executor = ProcessPoolExecutor(max_workers=2, steal=True, monitor=None, persistent=persistent)
+    executor = ProcessPoolExecutor(
+        max_workers=2, steal=True, monitor=None, persistent=persistent, comms=comms
+    )
     try:
         with mock.patch.object(StdPool, "submit", submit):
             executor.run(plan(BIG, (500, 500)))
@@ -63,8 +65,12 @@ def _child_interrupted_mid_submit(persistent: bool, out_path: str) -> None:
     Path(out_path).write_text(f"{outcome} after {len(submitted)} submit")
 
 
+@pytest.mark.parametrize("comms", ["ipc", "http"])
 @pytest.mark.parametrize("persistent", [False, True])
-def test_an_interrupt_between_submits_releases_the_started_worker(persistent: bool, tmp_path: Path) -> None:
-    out = tmp_path / f"mid-submit-{persistent}.txt"
-    run_in_child(f"mid-submit persistent={persistent}", _child_interrupted_mid_submit, (persistent, str(out)))
+def test_an_interrupt_between_submits_releases_the_started_worker(
+    persistent: bool, comms: str, tmp_path: Path
+) -> None:
+    out = tmp_path / f"mid-submit-{persistent}-{comms}.txt"
+    scenario = f"mid-submit persistent={persistent} comms={comms}"
+    run_in_child(scenario, _child_interrupted_mid_submit, (persistent, comms, str(out)))
     assert out.read_text() == "interrupted after 1 submit"

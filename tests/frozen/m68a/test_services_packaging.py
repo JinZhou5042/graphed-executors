@@ -20,10 +20,12 @@ from __future__ import annotations
 import configparser
 import importlib
 import re
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
 import pytest
+from coverage.misc import substitute_variables
 from services_harness import HARNESS_DIR, recipes_api
 
 ROOT = Path(HARNESS_DIR).parents[2]
@@ -106,9 +108,13 @@ def test_the_dask_job_lists_the_scope_memory_file() -> None:
 def test_the_htcondor_coverage_sources_include_the_service_set() -> None:
     parser = configparser.ConfigParser()
     parser.read(ROOT / ".coveragerc-htcondor")
-    sources = parser.get("run", "source").split()
-    assert "graphed_executors.submit.services" in sources, sources
-    assert "graphed_executors.htcondor_backend" in sources
+    # refrozen (owner ruling, 2026-10-20, #71): directory sources, the service set not omitted
+    roots = {(ROOT / substitute_variables(s, {})).resolve() for s in parser.get("run", "source").split()}
+    omit = parser.get("run", "omit", fallback="").split()
+    services = (SRC / "submit" / "services.py").resolve()
+    assert services.parent in roots, roots
+    assert not any(fnmatch(services.as_posix(), o) for o in omit), omit
+    assert (SRC / "htcondor_backend").resolve() in roots, roots
 
 
 def _engine_files() -> list[Path]:

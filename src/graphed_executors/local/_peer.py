@@ -35,6 +35,7 @@ from graphed.core import RunControl, RunState
 from graphed.core.execution import LocalResources, Partition, TaskEvent, TaskPhase, emit_task, partition_label
 from graphed.debug import StageError
 
+from ._pinned_pool import exit_with_driver
 from ._reduce import LazyReducer, running_fold
 from ._transport import HttpTransport, QueueTransport
 
@@ -496,6 +497,7 @@ def process_and_reduce(
     profiler_factory: Callable[[], Any] | None = None,
     prebuffered: Sequence[tuple[str, Any]] = (),
     close_resources: bool = True,
+    release: Any = None,
     monitor_factory: Callable[[], Any] | None = None,
     lean: bool = False,
     keys: Sequence[int] | None = None,
@@ -517,6 +519,10 @@ def process_and_reduce(
 
     ``resources`` (its ``open_once`` cache) is supplied by the caller; ``close_resources=False`` keeps
     it open across runs (a persistent pool reusing file handles, like the hub path).
+
+    ``release`` is the read end of the run's one-way pipe, whose only write end the driver holds. It
+    reads EOF once the driver closes that end on any exit of the run, or dies, and the actor then
+    leaves as on ``done``: the driver needs no worker address to fire it.
 
     ``emit`` events carry ``keys[leaf]`` (the leaf index without ``keys``); ``lean`` drops STARTED and
     the label; a ``monitor_factory`` builds this actor's own monitor, which then gets the task events
@@ -638,6 +644,8 @@ def process_and_reduce(
 
     try:
         while not done:
+            if released(release):  # the driver's run ended, however it ended
+                break
             if outbox._error is not None:  # a failed send (an unpicklable partial) never reaches the root
                 raise outbox._error
             while pending and not done:
@@ -767,6 +775,7 @@ def pinned_peer_actor(
     lean: bool = False,
     keys: Sequence[int] | None = None,
     complete: bool = False,
+    release: Any = None,
 ) -> dict[str, int]:
     """One run of the pinned worker: peer-reduce its leaves over the inherited transport, return the
     witness (the call's Future carries it back, and re-raises a worker error intact — M6/M7)."""
@@ -791,6 +800,7 @@ def pinned_peer_actor(
         keys=keys,
         complete=complete,
         close_resources=False,
+        release=release,
     )
 
 
@@ -810,6 +820,7 @@ def peer_pool_init(registry: dict[str, Any]) -> None:
     its own inbox + the peers' outboxes by address (no Manager server)."""
     global _peer_registry
     _peer_registry = registry
+    exit_with_driver()
 
 
 def pooled_peer_actor(
@@ -827,6 +838,7 @@ def pooled_peer_actor(
     lean: bool = False,
     keys: Sequence[int] | None = None,
     complete: bool = False,
+    release: Any = None,
 ) -> dict[str, int]:
     """Picklable pool entry point: resolve this actor's inbox/outboxes from the inherited full registry
     (set by :func:`peer_pool_init`) keyed by ``address``, then delegate to :func:`ipc_peer_actor`. Any
@@ -851,6 +863,7 @@ def pooled_peer_actor(
         lean=lean,
         keys=keys,
         complete=complete,
+        release=release,
     )
 
 
@@ -871,6 +884,7 @@ def ipc_peer_actor(
     lean: bool = False,
     keys: Sequence[int] | None = None,
     complete: bool = False,
+    release: Any = None,
 ) -> dict[str, int]:
     """Module-level (picklable) IPC actor: build the queue transport from the ``inbox``/``outboxes``
     handed in, then process + peer-reduce. The ``ProcessExecutor`` peer path uses
@@ -895,7 +909,18 @@ def ipc_peer_actor(
         keys=keys,
         complete=complete,
         close_resources=False,
+        release=release,
     )
+
+
+def released(release: Any) -> bool:
+    """Whether the run's release pipe (see :func:`process_and_reduce`) has been closed by its driver."""
+    if release is None:
+        return False
+    try:
+        return bool(release.poll())
+    except OSError:  # Windows reports the closed write end as a broken pipe, not as EOF
+        return True
 
 
 def http_peer_actor(
@@ -915,6 +940,7 @@ def http_peer_actor(
     lean: bool = False,
     keys: Sequence[int] | None = None,
     complete: bool = False,
+    release: Any = None,
 ) -> dict[str, int]:
     """Module-level (picklable) HTTP actor for ``ProcessExecutor``: bind a loopback server, announce
     ``(host, port)`` to the driver, wait for the assembled registry (buffering any node hand-offs that
@@ -927,6 +953,9 @@ def http_peer_actor(
     while registry is None:
         got = transport.recv(timeout=0.2)
         if got is None:
+            if released(release):  # the driver left before the handshake
+                transport.close()
+                raise RuntimeError("the driver left before sending the registry")
             continue
         payload: Any = got[1]
         if payload[0] == "registry":
@@ -954,6 +983,7 @@ def http_peer_actor(
             complete=complete,
             prebuffered=prebuffered,
             close_resources=False,
+            release=release,
         )
     finally:
         transport.close()
