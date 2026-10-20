@@ -206,6 +206,13 @@ module = ["htcondor2", "htcondor2.*", "classad2"]
 ignore_missing_imports = true
 follow_imports = "skip"
 
+# ndcctools.taskvine.vine_graph comes only with a CCTools build (not on PyPI) and is imported lazily by the
+# vine_graph backend.
+[[tool.mypy.overrides]]
+module = ["ndcctools", "ndcctools.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
 # tests/frozen/** is read-only under the §A.7 integrity rule, so the strict-mode diagnostics the
 # acceptance suites trip are disabled here rather than annotated away in place. This is NOT
 # ignore_errors: any code outside this list still fails the frozen tree. src/** and tests/extra/**
