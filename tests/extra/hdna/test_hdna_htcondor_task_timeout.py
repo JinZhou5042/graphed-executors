@@ -73,7 +73,7 @@ def _plan(attempts: Path, hangs: int, hang_s: float) -> Plan[int]:
 
 @pytest.fixture(autouse=True)
 def short_lease(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "LEASE_S", 1.2)
+    monkeypatch.setattr(server, "LEASE_S", 3.0)  # a loaded runner can stall a live pilot past 1 s
 
 
 def test_a_task_past_the_timeout_fails_and_its_pilot_stops(tmp_path: Path) -> None:

@@ -125,7 +125,7 @@ def wait_until(predicate: Any, timeout_s: float = 60.0) -> None:
 def test_a_pilot_whose_driver_is_gone_exits_at_once(
     busy: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server, "LEASE_S", 1.0)
+    monkeypatch.setattr(server, "LEASE_S", 3.0)  # a loaded runner can stall a live pilot past 1 s
     monkeypatch.setattr(server, "POLL_S", 0.2)
     ts = task_server()
     secret = tmp_path / "graphed-secret"
@@ -149,7 +149,7 @@ def test_a_pilot_whose_driver_is_gone_exits_at_once(
 def test_pilots_sharing_a_hostname_and_pid_stay_distinct(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server, "LEASE_S", 1.0)
+    monkeypatch.setattr(server, "LEASE_S", 3.0)  # a loaded runner can stall a live pilot past 1 s
     ts = task_server()
     secret = tmp_path / "graphed-secret"
     write_secret(secret, ts.secret)

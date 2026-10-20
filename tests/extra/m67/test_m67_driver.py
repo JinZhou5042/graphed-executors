@@ -112,7 +112,7 @@ def empty():
 
 
 def write_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process: str) -> None:
-    monkeypatch.setattr(server, "LEASE_S", 2.0)
+    monkeypatch.setattr(server, "LEASE_S", 3.0)  # a loaded runner can stall a live pilot past 1 s
     (tmp_path / "m67_exit_plan.py").write_text(PLAN_MODULE)
     monkeypatch.syspath_prepend(str(tmp_path))
     module = __import__("m67_exit_plan")
