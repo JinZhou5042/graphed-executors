@@ -18,6 +18,11 @@ Requires ``graphed`` 0.0.8 or later.
   longer runs the job's at-fork handlers before exec; under gRPC those could abort it (#53).
 * A persistent ``PinnedPoolExecutor`` keeps its worker processes when a plan's task count changes;
   it respawned them on every such run, which on a slow Windows runner could exhaust the root timeout (#30).
+* A partial or merge output that stdlib pickle refuses, such as one whose ``behavior`` holds a lambda the
+  ``reduce`` step built, returns from ``ProcessPoolExecutor`` and ``PinnedPoolExecutor`` workers
+  through cloudpickle on every route (``comms=None``, ``pooled_combines``, ``"ipc"``, ``"http"``); it
+  failed to pickle. HTCondor pilots and the HTCondor driver job carry such results the same way.
+  Values stdlib pickle accepts are still sent with it (#65).
 
 0.0.5
 -----

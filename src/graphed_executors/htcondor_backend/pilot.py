@@ -22,6 +22,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from graphed_executors.local._portable import PICKLE_ERRORS, Portable
+
 from . import server
 
 
@@ -66,7 +68,11 @@ def _run(data: bytes) -> tuple[bool, bytes]:
     """Run a leased ``(shim, fn, args)``; any failure comes back as a picklable exception."""
     try:
         shim, fn, args = pickle.loads(data)
-        return True, pickle.dumps(shim(fn, *args))
+        value = shim(fn, *args)
+        try:
+            return True, pickle.dumps(value)
+        except PICKLE_ERRORS:
+            return True, pickle.dumps(Portable(value))
     except Exception as exc:
         try:
             return False, pickle.dumps(exc)

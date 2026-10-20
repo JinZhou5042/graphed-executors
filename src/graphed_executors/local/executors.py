@@ -78,6 +78,7 @@ from ._peer import (
     worker_outbox_addresses,
 )
 from ._pinned_pool import PinnedProcessPool
+from ._portable import Portable
 from ._reduce import LazyReducer, plan_tree, running_fold, tree_reduce
 from ._transport import HttpTransport, PipeInbox, QueueTransport, build_transports
 
@@ -458,9 +459,18 @@ def _proc_task_shared(token: str, task: Task) -> object:
     )
 
 
+def _proc_task_portable(token: str, task: Task) -> object:
+    """The process pool's leaf entry: the partial returns through a pickle it may not survive."""
+    return Portable(_proc_task_shared(token, task))
+
+
 def _combine_task(combine: Callable[[object, object], object], a: object, b: object) -> object:
     """Pool entry for a pooled combine (module-level so a spawned process can import it)."""
     return combine(a, b)
+
+
+def _proc_combine_task(combine: Callable[[object, object], object], a: object, b: object) -> object:
+    return Portable(combine(a, b))
 
 
 def _wait_until(predicate: Callable[[], bool], timeout_s: float) -> None:
@@ -891,7 +901,15 @@ class _BaseExecutor:
                             out, a, b = combines[ci]
                             # a<b -> deterministic left/right grouping, same tree as the driver path
                             combine = cast("Callable[[object, object], object]", plan.combine)
-                            f2 = pool.submit(_combine_task, combine, ready.pop(a), ready.pop(b))
+                            if isinstance(self, _ProcessExecutorBase):  # inputs and output cross processes
+                                f2 = pool.submit(
+                                    _proc_combine_task,
+                                    combine,
+                                    Portable(ready.pop(a)),
+                                    Portable(ready.pop(b)),
+                                )
+                            else:
+                                f2 = pool.submit(_combine_task, combine, ready.pop(a), ready.pop(b))
                             node_of[f2] = out
                             n_combines += 1
                             self._combine_cb(leaves_done)
@@ -1487,7 +1505,7 @@ class _ProcessExecutorBase(_BaseExecutor):
         payload = pickle.dumps(process)  # pickled ONCE; the bytes are reused for the broadcast
         token = hashlib.sha256(payload).hexdigest()
         self._broadcast(pool, token, payload)
-        return lambda task: pool.submit(_proc_task_shared, token, task)
+        return lambda task: pool.submit(_proc_task_portable, token, task)
 
     # ---- M37 dashboard collector (worker side-channel -> driver monitor) ----
 

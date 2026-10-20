@@ -178,6 +178,13 @@ Two knobs shape this:
   not silently — when peer merging is on, because the two mean different things about who owns a
   node.
 
+However a partial crosses between processes — returned from a pool worker, sent to a pooled merge,
+passed between peers over ``ipc`` or ``http``, or returned by an HTCondor pilot or driver job — it
+is pickled with the standard library first.
+Only a value stdlib pickle refuses, such as an awkward array whose ``behavior`` holds a lambda your
+``reduce`` built, falls back to cloudpickle; a value neither can pickle fails the run with the
+pickling error.
+
 Picking a process pool
 ~~~~~~~~~~~~~~~~~~~~~~
 

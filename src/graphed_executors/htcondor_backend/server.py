@@ -36,6 +36,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
+from graphed_executors.local._portable import PICKLE_ERRORS, Portable
 from graphed_executors.local._transport import LookupFreeHTTPServer
 from graphed_executors.parsl_backend._shim import _parsl_task_shim
 from graphed_executors.parsl_backend.backend import _ParslFuture
@@ -157,7 +158,10 @@ class TaskServer:
                     return
             resolved = tuple(a.result() if isinstance(a, _ParslFuture) else a for a in args)
             try:
-                payload = pickle.dumps((_parsl_task_shim, fn, resolved))
+                try:
+                    payload = pickle.dumps((_parsl_task_shim, fn, resolved))
+                except PICKLE_ERRORS:  # an upstream result only cloudpickle carries
+                    payload = pickle.dumps((_parsl_task_shim, fn, Portable(resolved)))
             except Exception as exc:  # raised in a done-callback it would be logged and the task would hang
                 settle(fut, exc=exc)
                 return

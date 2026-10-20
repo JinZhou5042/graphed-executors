@@ -49,6 +49,7 @@ from typing import Any, TextIO
 from graphed.checkpoint import EnvironmentChanged, StoreUnavailable, resumable
 from graphed.debug import StageError
 
+from graphed_executors.local._portable import PICKLE_ERRORS, Portable
 from graphed_executors.submit.services import (
     ServiceSet,
     ServiceUnavailable,
@@ -140,7 +141,10 @@ def _result_blob(ok: bool, payload: object) -> bytes:
     round-trip (unpicklable, or an exception whose constructor differs from its ``args``) reaches the
     submitter as a ``RuntimeError`` carrying its text."""
     try:
-        blob = pickle.dumps((ok, payload))
+        try:
+            blob = pickle.dumps((ok, payload))
+        except PICKLE_ERRORS:
+            blob = pickle.dumps((ok, Portable(payload)))
         pickle.loads(blob)
         return blob
     except Exception as exc:

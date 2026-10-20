@@ -123,3 +123,8 @@ def concat(a: ak.Array, b: ak.Array) -> ak.Array:
 
 def empty_array() -> ak.Array:
     return ak.Array([])
+
+
+def lambda_behavior_reduce(values: Any) -> ak.Array:
+    """A partial whose behavior the reduce step builds itself, holding a local lambda."""
+    return ak.Array(ak.Array(values[0]).layout, behavior={"f": lambda x: x})

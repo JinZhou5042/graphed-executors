@@ -371,6 +371,9 @@ jobs:
             tests/frozen/m69b/test_service_order.py tests/extra/m69b \
             tests/frozen/m74/test_m74_htcondor.py tests/extra/m74 \
             tests/extra/hdna/test_hdna_htcondor_task_timeout.py \
+            'tests/extra/hdna/test_hdna_cloudpickle_results.py::test_a_reduce_built_lambda_behavior_returns_through_cloudpickle[htcondor]' \
+            'tests/extra/hdna/test_hdna_cloudpickle_results.py::test_a_stdlib_picklable_partial_never_uses_cloudpickle[htcondor]' \
+            tests/extra/hdna/test_hdna_cloudpickle_results.py::test_an_htcondor_pilot_and_driver_wrap_only_what_stdlib_pickle_refuses \
             --cov --cov-config=.coveragerc-htcondor \
             --cov-branch --cov-fail-under=0
           mv .coverage .coverage.driver
